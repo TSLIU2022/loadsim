@@ -6,7 +6,11 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify:
@@ -14,16 +18,64 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: 安装 Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
 
+      - name: 核对标签、源码版本与发布文档
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          test "$(go run . version)" = "LoadSim ${VERSION}"
+          test -s ".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [[ "${GITHUB_REF_NAME}" != *-* ]]; then
+            grep -Fq "## [${GITHUB_REF_NAME}] - " CHANGELOG.md
+          fi
+
+      - name: 校验依赖缓存
+        run: GOWORK=off go mod verify
+
+      - name: 检查格式
+        run: test -z "$(gofmt -l .)"
+
+      - name: 运行 vet
+        run: go vet ./...
+
+      - name: 获取已发布标签并验证发布说明
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          PUBLISHED_TAGS_FILE="${RUNNER_TEMP}/published-release-tags.txt"
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .tag_name' \
+            >"$PUBLISHED_TAGS_FILE"
+          PUBLISHED_TAGS_FILE="$PUBLISHED_TAGS_FILE" \
+            bash scripts/compose_release_body.sh \
+              "${GITHUB_REF_NAME}" \
+              "${RUNNER_TEMP}/release-body.md"
+
       - name: 运行测试
         run: go test ./...
+
+      - name: 运行竞态检测
+        run: go test -race ./...
+
+      - name: 测试发布说明组装
+        run: bash tests/test_compose_release_body.sh
+
+      - name: 测试第三方许可证汇编
+        run: bash tests/test_third_party_licenses.sh
 
   build:
     needs: verify
@@ -39,10 +91,12 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: 安装 Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -66,11 +120,22 @@ jobs:
             -o "$OUT_DIR/loadsim" \
             .
 
-          cp README.md LICENSE THIRD_PARTY_NOTICES.md "$OUT_DIR/"
+          CGO_ENABLED=0 bash scripts/generate_third_party_licenses.sh \
+            "$OUT_DIR/THIRD_PARTY_LICENSES.txt"
+          cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md "$OUT_DIR/"
+          for required in \
+            loadsim \
+            README.md \
+            CHANGELOG.md \
+            LICENSE \
+            THIRD_PARTY_NOTICES.md \
+            THIRD_PARTY_LICENSES.txt; do
+            test -s "$OUT_DIR/$required"
+          done
           tar -czf "$ARCHIVE" -C dist "$(basename "$OUT_DIR")"
 
       - name: 上传发布压缩包
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.tar.gz
@@ -81,7 +146,7 @@ jobs:
 
     steps:
       - name: 下载 linux amd64 发布压缩包
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-linux-amd64
           path: dist
@@ -99,9 +164,10 @@ jobs:
           EXTRACT_DIR="$(find compat -maxdepth 1 -mindepth 1 -type d | head -n 1)"
           test -n "$EXTRACT_DIR"
 
+          # centos:7 的多架构镜像清单摘要。
           docker run --rm \
             -v "$PWD/$EXTRACT_DIR:/opt/loadsim:ro" \
-            centos:7 \
+            centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 \
             /bin/sh -lc '/opt/loadsim/loadsim version && /opt/loadsim/loadsim cpu --help >/dev/null && /opt/loadsim/loadsim ram --help >/dev/null && /opt/loadsim/loadsim combo --help >/dev/null'
 
   release:
@@ -109,15 +175,20 @@ jobs:
       - build
       - compat-centos7
     runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: 下载发布压缩包
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
@@ -125,17 +196,107 @@ jobs:
       - name: 生成校验文件
         run: |
           set -euo pipefail
-          sha256sum dist/*.tar.gz > dist/checksums.txt
+          (
+            cd dist
+            sha256sum *.tar.gz > checksums.txt
+          )
+
+      - name: 生成构建来源证明
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: dist/*.tar.gz
 
       - name: 组装发布说明
+        id: release_context
         env:
+          GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          bash scripts/compose_release_body.sh "${GITHUB_REF_NAME}" "dist/release-body.md"
+          PUBLISHED_TAGS_FILE="${RUNNER_TEMP}/published-release-tags.txt"
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .tag_name' \
+            >"$PUBLISHED_TAGS_FILE"
+
+          existing_release=false
+          previous_tag_override=""
+          previous_tag_override_set=false
+          if grep -Fx -- "${GITHUB_REF_NAME}" "$PUBLISHED_TAGS_FILE" >/dev/null; then
+            existing_release=true
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+              --jq '.body // ""' \
+              >"${RUNNER_TEMP}/existing-release-body.md"
+
+            awk '
+              /^## / {
+                if ($0 == "## 变更对比") {
+                  found = 1
+                  capture = 1
+                  content = ""
+                } else if (capture) {
+                  capture = 0
+                }
+                next
+              }
+              capture {
+                content = content $0 ORS
+              }
+              END {
+                if (found) {
+                  printf "%s", content
+                }
+              }
+            ' "${RUNNER_TEMP}/existing-release-body.md" \
+              >"${RUNNER_TEMP}/existing-comparison-section.md"
+
+            compare_prefix="**完整变更**: https://github.com/${GITHUB_REPOSITORY}/compare/"
+            compare_suffix="...${GITHUB_REF_NAME}"
+            while IFS= read -r line; do
+              if [[ "$line" == "$compare_prefix"*"$compare_suffix" ]]; then
+                previous_tag_override="${line#"$compare_prefix"}"
+                previous_tag_override="${previous_tag_override%"$compare_suffix"}"
+                previous_tag_override_set=true
+                break
+              fi
+            done <"${RUNNER_TEMP}/existing-comparison-section.md"
+
+            if grep -Fx \
+              -e '当前版本是首个正式版，变更范围为当前仓库全部代码。' \
+              -e '当前 beta 版本之前没有可用于对比的已发布标签。' \
+              "${RUNNER_TEMP}/existing-comparison-section.md" >/dev/null; then
+              previous_tag_override=""
+              previous_tag_override_set=true
+            fi
+          fi
+          printf 'existing_release=%s\n' "$existing_release" >>"$GITHUB_OUTPUT"
+
+          if [[ "$previous_tag_override_set" == true ]]; then
+            if ! PUBLISHED_TAGS_FILE="$PUBLISHED_TAGS_FILE" \
+              PREVIOUS_TAG_OVERRIDE_SET=true \
+              PREVIOUS_TAG_OVERRIDE="$previous_tag_override" \
+              bash scripts/compose_release_body.sh \
+                "${GITHUB_REF_NAME}" \
+                "dist/release-body.md"; then
+              echo "::warning::已有发布页的历史 compare 基线无效，将按当前已发布版本重新计算。"
+              PUBLISHED_TAGS_FILE="$PUBLISHED_TAGS_FILE" \
+                bash scripts/compose_release_body.sh \
+                  "${GITHUB_REF_NAME}" \
+                  "dist/release-body.md"
+            fi
+          else
+            PUBLISHED_TAGS_FILE="$PUBLISHED_TAGS_FILE" \
+              bash scripts/compose_release_body.sh \
+                "${GITHUB_REF_NAME}" \
+                "dist/release-body.md"
+          fi
 
       - name: 发布 GitHub 版本
-        uses: softprops/action-gh-release@v2
+        if: steps.release_context.outputs.existing_release != 'true'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           name: ${{ github.ref_name }}
           body_path: dist/release-body.md
@@ -143,3 +304,17 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/checksums.txt
+
+      - name: 更新已存在的 GitHub 版本
+        if: steps.release_context.outputs.existing_release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" \
+            --notes-file "dist/release-body.md"
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz \
+            dist/checksums.txt \
+            --clobber

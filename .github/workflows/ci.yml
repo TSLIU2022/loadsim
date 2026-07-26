@@ -16,13 +16,18 @@ jobs:
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: 安装 Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: 校验依赖缓存
+        run: GOWORK=off go mod verify
 
       - name: 检查格式
         run: test -z "$(gofmt -l .)"
@@ -32,6 +37,15 @@ jobs:
 
       - name: 运行测试
         run: go test ./...
+
+      - name: 运行竞态检测
+        run: go test -race ./...
+
+      - name: 测试发布说明组装
+        run: bash tests/test_compose_release_body.sh
+
+      - name: 测试第三方许可证汇编
+        run: bash tests/test_third_party_licenses.sh
 
       - name: 构建
         run: go build ./...

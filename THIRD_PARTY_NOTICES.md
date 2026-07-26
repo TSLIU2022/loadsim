@@ -1,21 +1,14 @@
-# Third-Party Notices
+# 第三方软件说明
 
-This project uses open-source software.
+本项目使用以下主要开源依赖：
 
-The source code directly imports these primary dependencies:
+- `github.com/shirou/gopsutil/v4` `v4.26.6`
+  - 许可证：BSD 3-Clause
+- `github.com/spf13/cobra` `v1.10.2`
+  - 许可证：Apache License 2.0
+- `golang.org/x/sys` `v0.47.0`
+  - 许可证：BSD 3-Clause
 
-- `github.com/spf13/cobra` `v1.8.0`
-  License: Apache License 2.0
-- `github.com/shirou/gopsutil` `v3.21.11+incompatible`
-  License: BSD 3-Clause License
+运行时还会间接使用 `github.com/spf13/pflag` 等模块。完整、可复现的模块图及校验值记录在 `go.mod` 和 `go.sum` 中。
 
-The runtime also relies on:
-
-- `github.com/spf13/pflag` `v1.0.5`
-  License: BSD 3-Clause License
-
-Notes:
-
-- The full module graph is recorded in `go.mod` and `go.sum`.
-- Additional indirect modules may appear there because of platform-specific support code or upstream test dependencies.
-- License names above were verified from the local Go module cache used for this build environment.
+每个发布压缩包都会包含构建时自动生成的 `THIRD_PARTY_LICENSES.txt`。它包含构建该二进制所用 Go 运行时和标准库的 `LICENSE`、`PATENTS`，以及该目标平台实际链接到的第三方 Go 模块随附的完整许可证、版权和免责声明；任何必需授权文件缺失时，发布构建会直接失败。
