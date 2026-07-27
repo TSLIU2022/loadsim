@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -621,6 +622,9 @@ func readMemoryPairConstraint(limitPath, currentPath string) (memoryConstraint, 
 	if err != nil {
 		return memoryConstraint{}, fmt.Errorf("parse %s: %w", limitPath, err)
 	}
+	if isLegacyUnlimitedMemoryLimit(limitPath, limit) {
+		return memoryConstraint{valid: true}, nil
+	}
 
 	currentRaw, err := os.ReadFile(currentPath)
 	if err != nil {
@@ -636,6 +640,20 @@ func readMemoryPairConstraint(limitPath, currentPath string) (memoryConstraint, 
 		finite:  true,
 		valid:   true,
 	}, nil
+}
+
+func isLegacyUnlimitedMemoryLimit(path string, limit uint64) bool {
+	name := filepath.Base(path)
+	if name != "memory.limit_in_bytes" &&
+		name != "memory.memsw.limit_in_bytes" {
+		return false
+	}
+	pageSize := uint64(os.Getpagesize())
+	if pageSize == 0 || pageSize&(pageSize-1) != 0 {
+		return false
+	}
+	sentinel := uint64(math.MaxInt64) &^ (pageSize - 1)
+	return limit >= sentinel
 }
 
 func readCgroupMemoryHierarchy(

@@ -15,7 +15,7 @@ func testAdaptiveMemoryConfig() adaptiveMemoryConfig {
 	return adaptiveMemoryConfig{
 		lowPercent:               30,
 		highPercent:              50,
-		maxLoadPercent:           30,
+		maxLoadMB:                300,
 		interval:                 time.Second,
 		blockMB:                  16,
 		configuredMinAvailableMB: 0,
@@ -38,8 +38,8 @@ func TestValidateAdaptiveMemoryConfig(t *testing.T) {
 		{name: "reversed range", change: func(c *adaptiveMemoryConfig) { c.lowPercent = 50 }},
 		{name: "maximum above safety ceiling", change: func(c *adaptiveMemoryConfig) { c.highPercent = 81 }},
 		{name: "narrow range", change: func(c *adaptiveMemoryConfig) { c.highPercent = 34 }},
-		{name: "load share below minimum", change: func(c *adaptiveMemoryConfig) { c.maxLoadPercent = 29 }},
-		{name: "zero load share", change: func(c *adaptiveMemoryConfig) { c.maxLoadPercent = 0 }},
+		{name: "zero allocation cap", change: func(c *adaptiveMemoryConfig) { c.maxLoadMB = 0 }},
+		{name: "negative allocation cap", change: func(c *adaptiveMemoryConfig) { c.maxLoadMB = -1 }},
 		{name: "fast interval", change: func(c *adaptiveMemoryConfig) { c.interval = 100 * time.Millisecond }},
 		{name: "zero block", change: func(c *adaptiveMemoryConfig) { c.blockMB = 0 }},
 		{name: "large block", change: func(c *adaptiveMemoryConfig) { c.blockMB = maximumAdaptiveMemoryBlockMB + 1 }},
@@ -53,21 +53,6 @@ func TestValidateAdaptiveMemoryConfig(t *testing.T) {
 				t.Fatal("invalid config was accepted")
 			}
 		})
-	}
-}
-
-func TestParseRAMMode(t *testing.T) {
-	mode, adaptive, err := parseRAMMode(adaptiveRAMMode)
-	if err != nil || mode != stress.ModeFixed || !adaptive {
-		t.Fatalf("adaptive parse mode/adaptive/error=%q/%v/%v", mode, adaptive, err)
-	}
-	mode, adaptive, err = parseRAMMode("wave")
-	if err != nil || mode != stress.ModeWave || adaptive {
-		t.Fatalf("wave parse mode/adaptive/error=%q/%v/%v", mode, adaptive, err)
-	}
-	if _, _, err := parseRAMMode("unknown"); err == nil ||
-		!strings.Contains(err.Error(), "adaptive") {
-		t.Fatalf("invalid mode error=%v", err)
 	}
 }
 
@@ -170,7 +155,7 @@ func TestAdaptiveMemoryUsesMostConservativeConstraint(t *testing.T) {
 	}
 	if growth.action != adaptiveMemoryGrow ||
 		growth.targetMB != 100 ||
-		growth.hardCapMB != 150 {
+		growth.hardCapMB != 300 {
 		t.Fatalf("growth decision=%+v want cgroup-limited 100MB", growth)
 	}
 
@@ -279,16 +264,18 @@ func TestAdaptiveMemoryHardCapShrinksEvenInsideBand(t *testing.T) {
 
 func TestAdaptiveMemoryControllerRejectsConcurrentStart(t *testing.T) {
 	stressor, err := stress.NewRAMStressor(stress.RAMConfig{
-		Mode:              stress.ModeFixed,
-		SizeMB:            1,
-		RateLimitMBPerSec: 1,
-		ImmediateShrink:   true,
+		Mode:                     stress.ModeFixed,
+		SizeMB:                   1,
+		GrowthRateLimitMBPerSec:  1,
+		ReleaseRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
 	}
+	config := testAdaptiveMemoryConfig()
+	config.maxLoadMB = 30
 	controller, err := newAdaptiveMemoryController(
-		testAdaptiveMemoryConfig(),
+		config,
 		stressor,
 		stressor.Stop,
 	)
@@ -336,18 +323,20 @@ func TestAdaptiveMemoryControllerRejectsConcurrentStart(t *testing.T) {
 
 func TestAdaptiveMemoryControllerStopWaitsForStartupAndFailsClosed(t *testing.T) {
 	stressor, err := stress.NewRAMStressor(stress.RAMConfig{
-		Mode:              stress.ModeFixed,
-		SizeMB:            1,
-		BlockMB:           1,
-		ControlInterval:   time.Hour,
-		RateLimitMBPerSec: 1,
-		ImmediateShrink:   true,
+		Mode:                     stress.ModeFixed,
+		SizeMB:                   1,
+		BlockMB:                  1,
+		ControlInterval:          time.Hour,
+		GrowthRateLimitMBPerSec:  1,
+		ReleaseRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
 	}
+	config := testAdaptiveMemoryConfig()
+	config.maxLoadMB = 30
 	controller, err := newAdaptiveMemoryController(
-		testAdaptiveMemoryConfig(),
+		config,
 		stressor,
 		stressor.Stop,
 	)
@@ -435,7 +424,13 @@ func TestAdaptiveMemoryControllerStopWaitsForStartupAndFailsClosed(t *testing.T)
 }
 
 func TestAdaptiveMemoryRejectsInvalidCapacitySnapshots(t *testing.T) {
-	if _, err := adaptiveMemoryHardCapMB(nil, 30); err == nil {
+	if _, err := nextAdaptiveMemoryTarget(
+		testAdaptiveMemoryConfig(),
+		nil,
+		0,
+		0,
+		0,
+	); err == nil {
 		t.Fatal("empty capacity list was accepted")
 	}
 	if _, err := nextAdaptiveMemoryTarget(
@@ -451,12 +446,12 @@ func TestAdaptiveMemoryRejectsInvalidCapacitySnapshots(t *testing.T) {
 
 func TestAdaptiveMemoryControllerPreflightStartsAtZero(t *testing.T) {
 	stressor, err := stress.NewRAMStressor(stress.RAMConfig{
-		Mode:              stress.ModeFixed,
-		SizeMB:            1,
-		BlockMB:           1,
-		ControlInterval:   time.Hour,
-		RateLimitMBPerSec: 100,
-		ImmediateShrink:   true,
+		Mode:                     stress.ModeFixed,
+		SizeMB:                   1,
+		BlockMB:                  1,
+		ControlInterval:          time.Hour,
+		GrowthRateLimitMBPerSec:  100,
+		ReleaseRateLimitMBPerSec: 100,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
@@ -465,7 +460,7 @@ func TestAdaptiveMemoryControllerPreflightStartsAtZero(t *testing.T) {
 		adaptiveMemoryConfig{
 			lowPercent:               30,
 			highPercent:              50,
-			maxLoadPercent:           30,
+			maxLoadMB:                30,
 			interval:                 time.Hour,
 			blockMB:                  1,
 			configuredMinAvailableMB: 0,
@@ -526,10 +521,10 @@ func TestAdaptiveMemoryControllerPreflightStartsAtZero(t *testing.T) {
 
 func TestAdaptiveMemoryControllerPropagatesProbeFailure(t *testing.T) {
 	stressor, err := stress.NewRAMStressor(stress.RAMConfig{
-		Mode:              stress.ModeFixed,
-		SizeMB:            1,
-		RateLimitMBPerSec: 1,
-		ImmediateShrink:   true,
+		Mode:                     stress.ModeFixed,
+		SizeMB:                   1,
+		GrowthRateLimitMBPerSec:  1,
+		ReleaseRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
@@ -567,32 +562,32 @@ func TestAdaptiveMemoryControllerRequiresSafeStressorConfig(t *testing.T) {
 		{
 			name: "fixed mode",
 			config: stress.RAMConfig{
-				Mode:              stress.ModeWave,
-				MinSizeMB:         0,
-				MaxSizeMB:         1,
-				Period:            time.Second,
-				RateLimitMBPerSec: 1,
-				ImmediateShrink:   true,
+				Mode:                     stress.ModeWave,
+				MinSizeMB:                0,
+				MaxSizeMB:                1,
+				Period:                   time.Second,
+				GrowthRateLimitMBPerSec:  1,
+				ReleaseRateLimitMBPerSec: 1,
 			},
 			wantErr: "fixed-mode",
 		},
 		{
 			name: "positive growth limit",
 			config: stress.RAMConfig{
-				Mode:            stress.ModeFixed,
-				SizeMB:          1,
-				ImmediateShrink: true,
+				Mode:                     stress.ModeFixed,
+				SizeMB:                   1,
+				ReleaseRateLimitMBPerSec: 1,
 			},
 			wantErr: "positive RAM growth rate limit",
 		},
 		{
-			name: "immediate release",
+			name: "positive release limit",
 			config: stress.RAMConfig{
-				Mode:              stress.ModeFixed,
-				SizeMB:            1,
-				RateLimitMBPerSec: 1,
+				Mode:                    stress.ModeFixed,
+				SizeMB:                  1,
+				GrowthRateLimitMBPerSec: 1,
 			},
-			wantErr: "immediate RAM release",
+			wantErr: "positive RAM release rate limit",
 		},
 	}
 
@@ -621,12 +616,12 @@ func TestAdaptiveMemoryControllerRequiresSafeStressorConfig(t *testing.T) {
 
 func TestAdaptiveMemoryRuntimeProbeFailureStopsStressor(t *testing.T) {
 	stressor, err := stress.NewRAMStressor(stress.RAMConfig{
-		Mode:              stress.ModeFixed,
-		SizeMB:            1,
-		BlockMB:           1,
-		ControlInterval:   time.Hour,
-		RateLimitMBPerSec: 1,
-		ImmediateShrink:   true,
+		Mode:                     stress.ModeFixed,
+		SizeMB:                   1,
+		BlockMB:                  1,
+		ControlInterval:          time.Hour,
+		GrowthRateLimitMBPerSec:  1,
+		ReleaseRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
@@ -634,6 +629,7 @@ func TestAdaptiveMemoryRuntimeProbeFailureStopsStressor(t *testing.T) {
 	config := testAdaptiveMemoryConfig()
 	config.blockMB = 1
 	config.interval = minimumAdaptiveMemoryInterval
+	config.maxLoadMB = 30
 	controller, err := newAdaptiveMemoryController(
 		config,
 		stressor,

@@ -26,6 +26,13 @@ const defaultWorkerNice = 19
 // worker thread. A nil CPUConfig.WorkerNice uses the safe default nice value 19.
 const WorkerNiceInherit = 20
 
+type CPUWorkerScheduler string
+
+const (
+	WorkerSchedulerNormal CPUWorkerScheduler = "normal"
+	WorkerSchedulerIdle   CPUWorkerScheduler = "idle"
+)
+
 type CPUScope string
 
 const (
@@ -55,6 +62,7 @@ type CPUConfig struct {
 	SampleDuration  time.Duration
 	DeadbandPercent float64
 	MaxStepPercent  float64
+	WorkerScheduler CPUWorkerScheduler
 	WorkerNice      *int // nil defaults to 19; point to WorkerNiceInherit to disable adjustment
 }
 
@@ -62,6 +70,7 @@ type CPUStatus struct {
 	Mode                        Mode
 	Scope                       CPUScope
 	IdleMode                    CPUIdleMode
+	WorkerScheduler             CPUWorkerScheduler
 	WorkerNice                  int
 	ActiveWorkers               int
 	MaxWorkers                  int
@@ -110,6 +119,7 @@ type visibleSystemCPUSampler func(
 	time.Duration,
 ) (VisibleSystemCPUSample, error)
 type workerPrioritySetup func(int) error
+type workerSchedulerSetup func(CPUWorkerScheduler) error
 
 type CPUStressor struct {
 	config CPUConfig
@@ -136,7 +146,9 @@ type CPUStressor struct {
 	boundaryID       string
 	boundaryKind     VisibleSystemCPUBoundaryKind
 	cpuConsistency   cpuConsistencyMonitor
+	workerScheduler  CPUWorkerScheduler
 	workerNice       int
+	setupScheduler   workerSchedulerSetup
 	setupWorkerNice  workerPrioritySetup
 	startedAt        time.Time
 	requestedPercent float64
@@ -152,6 +164,25 @@ type cpuWorker struct {
 
 func NewCPUStressor(config CPUConfig) (*CPUStressor, error) {
 	return newCPUStressor(config, detectCPUCapacity, sampleHostCPUPercent)
+}
+
+// ProbeCPUWorkerScheduler applies and verifies a scheduling policy on a
+// disposable locked OS thread. The thread exits after the probe so a
+// low-priority policy cannot leak back into the Go runtime thread pool.
+func ProbeCPUWorkerScheduler(scheduler CPUWorkerScheduler) error {
+	if scheduler != WorkerSchedulerNormal &&
+		scheduler != WorkerSchedulerIdle {
+		return fmt.Errorf("CPU worker scheduler must be normal or idle")
+	}
+	result := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		result <- platformWorkerSchedulerSetup(scheduler)
+	}()
+	if err := <-result; err != nil {
+		return fmt.Errorf("probe CPU worker scheduler %s: %w", scheduler, err)
+	}
+	return nil
 }
 
 func newCPUStressor(
@@ -196,6 +227,13 @@ func newCPUStressorWithSystemAccounting(
 	workerNice, err := normalizeWorkerNice(config.WorkerNice)
 	if err != nil {
 		return nil, err
+	}
+	if config.WorkerScheduler == "" {
+		config.WorkerScheduler = WorkerSchedulerNormal
+	}
+	if config.WorkerScheduler != WorkerSchedulerNormal &&
+		config.WorkerScheduler != WorkerSchedulerIdle {
+		return nil, fmt.Errorf("CPU worker scheduler must be normal or idle")
 	}
 
 	if config.Cycle == 0 {
@@ -336,7 +374,9 @@ func newCPUStressorWithSystemAccounting(
 		accountingSource: accountingSource,
 		boundaryID:       boundaryID,
 		boundaryKind:     boundaryKind,
+		workerScheduler:  config.WorkerScheduler,
 		workerNice:       workerNice,
+		setupScheduler:   platformWorkerSchedulerSetup,
 		setupWorkerNice:  platformWorkerPrioritySetup,
 	}, nil
 }
@@ -455,6 +495,7 @@ func (s *CPUStressor) Status() CPUStatus {
 		Mode:                    s.config.Mode,
 		Scope:                   s.config.Scope,
 		IdleMode:                s.config.IdleMode,
+		WorkerScheduler:         s.workerScheduler,
 		WorkerNice:              s.workerNice,
 		ActiveWorkers:           activeWorkerCount(s.appliedPercent, s.config.Cores),
 		MaxWorkers:              s.config.Cores,
@@ -853,6 +894,8 @@ func (s *CPUStressor) ensureWorkersLocked(count int) error {
 				s.stopCh,
 				w,
 				s.config.Cycle,
+				s.workerScheduler,
+				s.setupScheduler,
 				s.workerNice,
 				s.setupWorkerNice,
 				initialized,
@@ -860,7 +903,7 @@ func (s *CPUStressor) ensureWorkersLocked(count int) error {
 		}(worker, ready)
 		if err := <-ready; err != nil {
 			s.trimWorkersLocked(0)
-			return fmt.Errorf("initialize CPU worker scheduling priority: %w", err)
+			return fmt.Errorf("initialize CPU worker scheduling: %w", err)
 		}
 	}
 	return nil
@@ -881,6 +924,8 @@ func runCPUWorker(
 	stop <-chan struct{},
 	worker *cpuWorker,
 	cycle time.Duration,
+	workerScheduler CPUWorkerScheduler,
+	setupScheduler workerSchedulerSetup,
 	workerNice int,
 	setupPriority workerPrioritySetup,
 	ready chan<- error,
@@ -890,7 +935,16 @@ func runCPUWorker(
 	// priority, so the thread must be terminated with the goroutine instead of
 	// returning to the runtime thread pool.
 
-	if workerNice != WorkerNiceInherit {
+	if setupScheduler == nil {
+		ready <- fmt.Errorf("worker scheduler setup is not available")
+		return
+	}
+	if err := setupScheduler(workerScheduler); err != nil {
+		ready <- err
+		return
+	}
+	if workerScheduler == WorkerSchedulerNormal &&
+		workerNice != WorkerNiceInherit {
 		if setupPriority == nil {
 			ready <- fmt.Errorf("worker priority setup is not available")
 			return

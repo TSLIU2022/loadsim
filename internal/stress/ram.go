@@ -21,28 +21,26 @@ var (
 )
 
 type RAMConfig struct {
-	Mode              Mode
-	SizeMB            int
-	MinSizeMB         int
-	MaxSizeMB         int
-	Period            time.Duration
-	BlockMB           int
-	ControlInterval   time.Duration
-	RateLimitMBPerSec int
-	// ImmediateShrink bypasses RateLimitMBPerSec only when releasing RAM.
-	// Growth remains rate limited.
-	ImmediateShrink bool
+	Mode                     Mode
+	SizeMB                   int
+	MinSizeMB                int
+	MaxSizeMB                int
+	Period                   time.Duration
+	BlockMB                  int
+	ControlInterval          time.Duration
+	GrowthRateLimitMBPerSec  int
+	ReleaseRateLimitMBPerSec int
 }
 
 type RAMStatus struct {
-	Mode            Mode
-	RequestedMB     int
-	TargetMB        int
-	AppliedMB       int
-	CurrentMB       int
-	BlockMB         int
-	RateLimitMB     int
-	ImmediateShrink bool
+	Mode               Mode
+	RequestedMB        int
+	TargetMB           int
+	AppliedMB          int
+	CurrentMB          int
+	BlockMB            int
+	GrowthRateLimitMB  int
+	ReleaseRateLimitMB int
 }
 
 type ramBlock struct {
@@ -79,8 +77,9 @@ type RAMStressor struct {
 	currentMB      int
 	blocks         []ramBlock
 
-	rateLastAt   time.Time
-	rateCreditMB float64
+	rateLastAt    time.Time
+	rateCreditMB  float64
+	rateDirection int
 }
 
 func NewRAMStressor(config RAMConfig) (*RAMStressor, error) {
@@ -96,8 +95,11 @@ func NewRAMStressor(config RAMConfig) (*RAMStressor, error) {
 	if config.ControlInterval == 0 {
 		config.ControlInterval = 250 * time.Millisecond
 	}
-	if config.RateLimitMBPerSec < 0 {
-		return nil, fmt.Errorf("RAM rate limit must not be negative")
+	if config.GrowthRateLimitMBPerSec < 0 {
+		return nil, fmt.Errorf("RAM growth rate limit must not be negative")
+	}
+	if config.ReleaseRateLimitMBPerSec < 0 {
+		return nil, fmt.Errorf("RAM release rate limit must not be negative")
 	}
 
 	switch config.Mode {
@@ -131,9 +133,14 @@ func NewRAMStressor(config RAMConfig) (*RAMStressor, error) {
 	if _, err := mbToBytes(config.BlockMB); err != nil {
 		return nil, fmt.Errorf("invalid RAM block size: %w", err)
 	}
-	if config.RateLimitMBPerSec > 0 {
-		if _, err := mbToBytes(config.RateLimitMBPerSec); err != nil {
-			return nil, fmt.Errorf("invalid RAM rate limit: %w", err)
+	if config.GrowthRateLimitMBPerSec > 0 {
+		if _, err := mbToBytes(config.GrowthRateLimitMBPerSec); err != nil {
+			return nil, fmt.Errorf("invalid RAM growth rate limit: %w", err)
+		}
+	}
+	if config.ReleaseRateLimitMBPerSec > 0 {
+		if _, err := mbToBytes(config.ReleaseRateLimitMBPerSec); err != nil {
+			return nil, fmt.Errorf("invalid RAM release rate limit: %w", err)
 		}
 	}
 
@@ -172,6 +179,7 @@ func (s *RAMStressor) Start() error {
 	s.startedAt = now
 	s.rateLastAt = now
 	s.rateCreditMB = 0
+	s.rateDirection = 0
 	s.wg.Add(1)
 	go s.controlLoop()
 	return nil
@@ -264,14 +272,14 @@ func (s *RAMStressor) Status() RAMStatus {
 	defer s.lock.RUnlock()
 
 	return RAMStatus{
-		Mode:            s.config.Mode,
-		RequestedMB:     s.requestedMB,
-		TargetMB:        s.targetMB,
-		AppliedMB:       s.currentMB,
-		CurrentMB:       s.currentMB,
-		BlockMB:         s.config.BlockMB,
-		RateLimitMB:     s.config.RateLimitMBPerSec,
-		ImmediateShrink: s.config.ImmediateShrink,
+		Mode:               s.config.Mode,
+		RequestedMB:        s.requestedMB,
+		TargetMB:           s.targetMB,
+		AppliedMB:          s.currentMB,
+		CurrentMB:          s.currentMB,
+		BlockMB:            s.config.BlockMB,
+		GrowthRateLimitMB:  s.config.GrowthRateLimitMBPerSec,
+		ReleaseRateLimitMB: s.config.ReleaseRateLimitMBPerSec,
 	}
 }
 
@@ -485,35 +493,41 @@ func (s *RAMStressor) limitTargetChange(targetMB int) int {
 }
 
 func (s *RAMStressor) limitTargetChangeAt(targetMB int, now time.Time) int {
-	if s.config.RateLimitMBPerSec == 0 {
-		return targetMB
-	}
-
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
 	delta := targetMB - s.currentMB
-	if delta < 0 && s.config.ImmediateShrink {
+	if delta == 0 {
 		s.rateLastAt = now
 		s.rateCreditMB = 0
+		s.rateDirection = 0
 		return targetMB
 	}
 
-	if s.rateLastAt.IsZero() {
+	direction := 1
+	rateLimitMBPerSec := s.config.GrowthRateLimitMBPerSec
+	if delta < 0 {
+		direction = -1
+		rateLimitMBPerSec = s.config.ReleaseRateLimitMBPerSec
+	}
+	if rateLimitMBPerSec == 0 {
 		s.rateLastAt = now
 		s.rateCreditMB = 0
+		s.rateDirection = 0
+		return targetMB
+	}
+
+	if s.rateLastAt.IsZero() || s.rateDirection != direction {
+		s.rateLastAt = now
+		s.rateCreditMB = 0
+		s.rateDirection = direction
 		return s.currentMB
 	}
 
 	elapsed := now.Sub(s.rateLastAt)
 	s.rateLastAt = now
 	if elapsed > 0 {
-		s.rateCreditMB += elapsed.Seconds() * float64(s.config.RateLimitMBPerSec)
-	}
-
-	if delta == 0 {
-		s.rateCreditMB = 0
-		return targetMB
+		s.rateCreditMB += elapsed.Seconds() * float64(rateLimitMBPerSec)
 	}
 
 	var allowedMB int
@@ -532,6 +546,7 @@ func (s *RAMStressor) limitTargetChangeAt(targetMB int, now time.Time) int {
 	}
 	if allowedMB >= distanceMB {
 		s.rateCreditMB = 0
+		s.rateDirection = 0
 		return targetMB
 	}
 

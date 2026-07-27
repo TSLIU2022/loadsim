@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	adaptiveRAMMode                = "adaptive"
 	defaultAdaptiveMemoryInterval  = 3 * time.Second
 	minimumAdaptiveMemoryInterval  = 500 * time.Millisecond
 	minimumAdaptiveMemoryBandWidth = 5.0
@@ -23,7 +22,7 @@ const (
 type adaptiveMemoryConfig struct {
 	lowPercent               float64
 	highPercent              float64
-	maxLoadPercent           float64
+	maxLoadMB                int
 	interval                 time.Duration
 	blockMB                  int
 	configuredMinAvailableMB uint64
@@ -39,15 +38,14 @@ const (
 )
 
 type adaptiveMemoryStatus struct {
-	lowPercent     float64
-	highPercent    float64
-	maxLoadPercent float64
-	observed       float64
-	scope          string
-	action         adaptiveMemoryAction
-	targetMB       int
-	hardCapMB      int
-	hasSample      bool
+	lowPercent  float64
+	highPercent float64
+	observed    float64
+	scope       string
+	action      adaptiveMemoryAction
+	targetMB    int
+	hardCapMB   int
+	hasSample   bool
 }
 
 type adaptiveMemoryDecision struct {
@@ -94,11 +92,11 @@ func newAdaptiveMemoryController(
 	if ramStatus.Mode != stress.ModeFixed {
 		return nil, fmt.Errorf("adaptive memory requires a fixed-mode RAM stressor")
 	}
-	if ramStatus.RateLimitMB <= 0 {
+	if ramStatus.GrowthRateLimitMB <= 0 {
 		return nil, fmt.Errorf("adaptive memory requires a positive RAM growth rate limit")
 	}
-	if !ramStatus.ImmediateShrink {
-		return nil, fmt.Errorf("adaptive memory requires immediate RAM release")
+	if ramStatus.ReleaseRateLimitMB <= 0 {
+		return nil, fmt.Errorf("adaptive memory requires a positive RAM release rate limit")
 	}
 	if emergencyStop == nil {
 		return nil, fmt.Errorf("adaptive memory emergency stop is not configured")
@@ -112,20 +110,18 @@ func newAdaptiveMemoryController(
 		stopCh:        make(chan struct{}),
 		errorsCh:      make(chan error, 1),
 		status: adaptiveMemoryStatus{
-			lowPercent:     config.lowPercent,
-			highPercent:    config.highPercent,
-			maxLoadPercent: config.maxLoadPercent,
-			scope:          "pending",
-			action:         adaptiveMemoryHold,
+			lowPercent:  config.lowPercent,
+			highPercent: config.highPercent,
+			scope:       "pending",
+			action:      adaptiveMemoryHold,
 		},
 	}, nil
 }
 
 func validateAdaptiveMemoryConfig(config adaptiveMemoryConfig) error {
 	for name, value := range map[string]float64{
-		"minimum":      config.lowPercent,
-		"maximum":      config.highPercent,
-		"maximum load": config.maxLoadPercent,
+		"minimum": config.lowPercent,
+		"maximum": config.highPercent,
 	} {
 		if math.IsNaN(value) || math.IsInf(value, 0) {
 			return fmt.Errorf("adaptive RAM %s percent must be finite", name)
@@ -145,13 +141,8 @@ func validateAdaptiveMemoryConfig(config adaptiveMemoryConfig) error {
 			minimumAdaptiveMemoryBandWidth,
 		)
 	}
-	if config.maxLoadPercent <= 0 ||
-		config.maxLoadPercent < config.lowPercent ||
-		config.maxLoadPercent > maximumAdaptiveMemoryPercent {
-		return fmt.Errorf(
-			"adaptive RAM maximum LoadSim share must be between the minimum target and %.0f percent",
-			maximumAdaptiveMemoryPercent,
-		)
+	if config.maxLoadMB <= 0 {
+		return fmt.Errorf("adaptive RAM maximum allocation must be greater than zero")
 	}
 	if config.interval < minimumAdaptiveMemoryInterval {
 		return fmt.Errorf(
@@ -168,20 +159,6 @@ func validateAdaptiveMemoryConfig(config adaptiveMemoryConfig) error {
 	return nil
 }
 
-func parseRAMMode(value string) (stress.Mode, bool, error) {
-	if value == adaptiveRAMMode {
-		return stress.ModeFixed, true, nil
-	}
-	mode, err := stress.ParseMode(value)
-	if err != nil {
-		return "", false, fmt.Errorf(
-			"invalid RAM mode %q, must be fixed, wave, or adaptive",
-			value,
-		)
-	}
-	return mode, false, nil
-}
-
 // Preflight starts adaptive mode from zero, verifies the worst permitted
 // LoadSim allocation against every current memory constraint, and returns that
 // allocation cap for the independent runtime guard.
@@ -190,13 +167,7 @@ func (c *adaptiveMemoryController) Preflight() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("probe adaptive RAM capacity: %w", err)
 	}
-	hardCapMB, err := adaptiveMemoryHardCapMB(
-		capacities,
-		c.config.maxLoadPercent,
-	)
-	if err != nil {
-		return 0, err
-	}
+	hardCapMB := c.config.maxLoadMB
 	if err := validateRAMCapacitySnapshots(
 		capacities,
 		hardCapMB,
@@ -402,13 +373,12 @@ func nextAdaptiveMemoryTarget(
 	requestedMB int,
 	lowSamples int,
 ) (adaptiveMemoryDecision, error) {
-	hardCapMB, err := adaptiveMemoryHardCapMB(
-		capacities,
-		config.maxLoadPercent,
-	)
-	if err != nil {
-		return adaptiveMemoryDecision{}, err
+	if len(capacities) == 0 {
+		return adaptiveMemoryDecision{}, fmt.Errorf(
+			"adaptive RAM probe returned no constraints",
+		)
 	}
+	hardCapMB := config.maxLoadMB
 	if currentMB < 0 || requestedMB < 0 {
 		return adaptiveMemoryDecision{}, fmt.Errorf(
 			"adaptive RAM state contains a negative target",
@@ -512,41 +482,6 @@ func nextAdaptiveMemoryTarget(
 		decision.targetMB = currentMB
 	}
 	return decision, nil
-}
-
-func adaptiveMemoryHardCapMB(
-	capacities []memoryCapacity,
-	maxLoadPercent float64,
-) (int, error) {
-	if len(capacities) == 0 {
-		return 0, fmt.Errorf("adaptive RAM probe returned no constraints")
-	}
-
-	hardCapMB := math.MaxInt
-	for _, capacity := range capacities {
-		if capacity.totalMB == 0 {
-			return 0, fmt.Errorf(
-				"adaptive RAM constraint %s has zero total memory",
-				capacity.source,
-			)
-		}
-		candidate := math.Floor(
-			float64(capacity.totalMB) * maxLoadPercent / 100,
-		)
-		if candidate > float64(math.MaxInt) {
-			return 0, fmt.Errorf(
-				"adaptive RAM cap for %s exceeds addressable memory",
-				capacity.source,
-			)
-		}
-		if int(candidate) < hardCapMB {
-			hardCapMB = int(candidate)
-		}
-	}
-	if hardCapMB <= 0 {
-		return 0, fmt.Errorf("adaptive RAM maximum LoadSim share rounds to 0MB")
-	}
-	return hardCapMB, nil
 }
 
 func adaptiveTargetForCapacity(

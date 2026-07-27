@@ -168,7 +168,7 @@ jobs:
           docker run --rm \
             -v "$PWD/$EXTRACT_DIR:/opt/loadsim:ro" \
             centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 \
-            /bin/sh -lc '/opt/loadsim/loadsim version && /opt/loadsim/loadsim cpu --help >/dev/null && /opt/loadsim/loadsim ram --help >/dev/null && /opt/loadsim/loadsim combo --help >/dev/null'
+            /bin/sh -lc '/opt/loadsim/loadsim version && /opt/loadsim/loadsim fill --help >/dev/null && /opt/loadsim/loadsim stress --help >/dev/null && /opt/loadsim/loadsim check --help >/dev/null'
 
   release:
     needs:

@@ -1,9 +1,11 @@
 package system
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -872,6 +874,65 @@ func TestReadMemoryPairUnlimited(t *testing.T) {
 
 	if _, _, ok, err := readMemoryPair(limitPath, currentPath); err != nil || ok {
 		t.Fatalf("unlimited pair ok=%v err=%v", ok, err)
+	}
+}
+
+func TestReadMemoryPairRecognizesLegacyNumericUnlimitedSentinel(t *testing.T) {
+	dir := t.TempDir()
+	pageSize := uint64(os.Getpagesize())
+	sentinel := uint64(math.MaxInt64) &^ (pageSize - 1)
+
+	for _, name := range []string{
+		"memory.limit_in_bytes",
+		"memory.memsw.limit_in_bytes",
+	} {
+		limitPath := filepath.Join(dir, name)
+		if err := os.WriteFile(
+			limitPath,
+			[]byte(strconv.FormatUint(sentinel, 10)+"\n"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		constraint, err := readMemoryPairConstraint(
+			limitPath,
+			filepath.Join(dir, "missing.usage"),
+		)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !constraint.valid || constraint.finite {
+			t.Fatalf(
+				"%s constraint=%+v want valid unlimited",
+				name,
+				constraint,
+			)
+		}
+	}
+}
+
+func TestReadMemoryPairKeepsNumericV2LimitFinite(t *testing.T) {
+	dir := t.TempDir()
+	limitPath := filepath.Join(dir, "memory.max")
+	currentPath := filepath.Join(dir, "memory.current")
+	limit := uint64(math.MaxInt64) &^ (uint64(os.Getpagesize()) - 1)
+	if err := os.WriteFile(
+		limitPath,
+		[]byte(strconv.FormatUint(limit, 10)+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentPath, []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	constraint, err := readMemoryPairConstraint(limitPath, currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !constraint.valid || !constraint.finite || constraint.limit != limit {
+		t.Fatalf("constraint=%+v want finite numeric v2 limit", constraint)
 	}
 }
 

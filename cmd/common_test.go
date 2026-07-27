@@ -663,7 +663,12 @@ func TestDrainClosedErrorsPreservesPendingRuntimeFailure(t *testing.T) {
 }
 
 func TestCommandsRejectPositionalArguments(t *testing.T) {
-	for _, command := range []*cobra.Command{cpuCmd, ramCmd, comboCmd, versionCmd} {
+	for _, command := range []*cobra.Command{
+		fillCmd,
+		stressCmd,
+		checkCmd,
+		versionCmd,
+	} {
 		if err := command.Args(command, []string{"unexpected"}); err == nil {
 			t.Fatalf("%s accepted a positional argument", command.Name())
 		}
@@ -671,46 +676,62 @@ func TestCommandsRejectPositionalArguments(t *testing.T) {
 }
 
 func TestSafeDefaultsAreBounded(t *testing.T) {
-	if cpuRunTimeSec <= 0 || ramRunTimeSec <= 0 || comboRunTimeSec <= 0 {
-		t.Fatalf("run time defaults must be bounded: cpu=%d ram=%d combo=%d", cpuRunTimeSec, ramRunTimeSec, comboRunTimeSec)
-	}
-	if ramSizeMB > 256 || comboRAMSizeMB > 256 {
-		t.Fatalf("RAM defaults are too large: ram=%d combo=%d", ramSizeMB, comboRAMSizeMB)
-	}
-	if ramMemoryCheckMS != 100 || comboMemoryCheckMS != 100 {
+	if fillConfig.durationSec <= 0 || stressConfig.durationSec <= 0 {
 		t.Fatalf(
-			"memory check defaults must be 100ms: ram=%d combo=%d",
-			ramMemoryCheckMS,
-			comboMemoryCheckMS,
+			"run time defaults must be bounded: fill=%d stress=%d",
+			fillConfig.durationSec,
+			stressConfig.durationSec,
 		)
 	}
-	if ramMinAvailableMB != 0 || comboMinAvailableMB != 0 {
+	if fillConfig.memoryMaxMiB != 0 || fillConfig.memoryMaxGiB != 0 {
 		t.Fatalf(
-			"memory threshold defaults must be automatic: ram=%d combo=%d",
-			ramMinAvailableMB,
-			comboMinAvailableMB,
+			"fill memory maximum must be explicit: mib=%d gib=%d",
+			fillConfig.memoryMaxMiB,
+			fillConfig.memoryMaxGiB,
 		)
 	}
-	if ramOOMScoreAdj != 1000 || comboOOMScoreAdj != 1000 {
+	if fillConfig.memoryCheckMS != 100 ||
+		stressConfig.memoryCheckMS != 100 {
 		t.Fatalf(
-			"OOM score defaults must prefer LoadSim: ram=%d combo=%d",
-			ramOOMScoreAdj,
-			comboOOMScoreAdj,
+			"memory check defaults must be 100ms: fill=%d stress=%d",
+			fillConfig.memoryCheckMS,
+			stressConfig.memoryCheckMS,
 		)
 	}
-	if cpuWorkerNice != "19" || comboCPUWorkerNice != "19" {
+	if fillConfig.memoryMinAvailableMiB != 0 ||
+		stressConfig.memoryMinAvailableMiB != 0 {
 		t.Fatalf(
-			"CPU worker nice defaults must yield to normal work: cpu=%q combo=%q",
-			cpuWorkerNice,
-			comboCPUWorkerNice,
+			"memory threshold defaults must be automatic: fill=%d stress=%d",
+			fillConfig.memoryMinAvailableMiB,
+			stressConfig.memoryMinAvailableMiB,
 		)
+	}
+	if fillConfig.oomScoreAdj != 1000 ||
+		stressConfig.oomScoreAdj != 1000 {
+		t.Fatalf(
+			"OOM score defaults must prefer LoadSim: fill=%d stress=%d",
+			fillConfig.oomScoreAdj,
+			stressConfig.oomScoreAdj,
+		)
+	}
+	if fillConfig.cpuScheduler != "idle" ||
+		stressConfig.cpuScheduler != "normal" {
+		t.Fatalf(
+			"unexpected scheduler defaults: fill=%q stress=%q",
+			fillConfig.cpuScheduler,
+			stressConfig.cpuScheduler,
+		)
+	}
+	if fillConfig.memoryGrowMiBPerSec <= 0 ||
+		fillConfig.memoryReleaseMiBPerSec <= 0 {
+		t.Fatal("fill memory growth and release defaults must be rate limited")
 	}
 }
 
 func TestRAMCommandsExposeRuntimeMemorySafetyFlags(t *testing.T) {
-	for _, command := range []*cobra.Command{ramCmd, comboCmd} {
+	for _, command := range []*cobra.Command{fillCmd, stressCmd} {
 		for _, name := range []string{
-			"memory-min-available",
+			"memory-min-available-mib",
 			"memory-check-ms",
 			"oom-score-adj",
 		} {
@@ -722,11 +743,13 @@ func TestRAMCommandsExposeRuntimeMemorySafetyFlags(t *testing.T) {
 }
 
 func TestCPUCommandsExposeWorkerNiceFlags(t *testing.T) {
-	if cpuCmd.Flags().Lookup("worker-nice") == nil {
-		t.Fatal("cpu is missing --worker-nice")
-	}
-	if comboCmd.Flags().Lookup("cpu-worker-nice") == nil {
-		t.Fatal("combo is missing --cpu-worker-nice")
+	for _, command := range []*cobra.Command{fillCmd, stressCmd} {
+		if command.Flags().Lookup("cpu-scheduler") == nil {
+			t.Fatalf("%s is missing --cpu-scheduler", command.Name())
+		}
+		if command.Flags().Lookup("cpu-nice") == nil {
+			t.Fatalf("%s is missing --cpu-nice", command.Name())
+		}
 	}
 }
 

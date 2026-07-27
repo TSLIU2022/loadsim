@@ -73,11 +73,20 @@ func TestNewRAMStressorValidation(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "negative rate limit",
+			name: "negative growth rate limit",
 			cfg: RAMConfig{
-				Mode:              ModeFixed,
-				SizeMB:            1,
-				RateLimitMBPerSec: -1,
+				Mode:                    ModeFixed,
+				SizeMB:                  1,
+				GrowthRateLimitMBPerSec: -1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "negative release rate limit",
+			cfg: RAMConfig{
+				Mode:                     ModeFixed,
+				SizeMB:                   1,
+				ReleaseRateLimitMBPerSec: -1,
 			},
 			wantErr: true,
 		},
@@ -280,12 +289,12 @@ func TestRAMTailShrinkKeepsPrefixInPlace(t *testing.T) {
 
 func TestRAMRateLimitUsesElapsedTimeAndFractionalCredit(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
-		Mode:              ModeWave,
-		MinSizeMB:         0,
-		MaxSizeMB:         256,
-		Period:            60 * time.Second,
-		ControlInterval:   250 * time.Millisecond,
-		RateLimitMBPerSec: 1,
+		Mode:                    ModeWave,
+		MinSizeMB:               0,
+		MaxSizeMB:               256,
+		Period:                  60 * time.Second,
+		ControlInterval:         250 * time.Millisecond,
+		GrowthRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -293,6 +302,7 @@ func TestRAMRateLimitUsesElapsedTimeAndFractionalCredit(t *testing.T) {
 
 	base := time.Now()
 	stressor.rateLastAt = base
+	stressor.rateDirection = 1
 	for step := 1; step <= 3; step++ {
 		if got := stressor.limitTargetChangeAt(100, base.Add(time.Duration(step)*250*time.Millisecond)); got != 0 {
 			t.Fatalf("step %d target=%d want=0 before one full MB accrues", step, got)
@@ -313,9 +323,9 @@ func TestRAMRateLimitUsesElapsedTimeAndFractionalCredit(t *testing.T) {
 
 func TestRAMRateLimitDoesNotBankCreditAtTarget(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
-		Mode:              ModeFixed,
-		SizeMB:            100,
-		RateLimitMBPerSec: 4,
+		Mode:                    ModeFixed,
+		SizeMB:                  100,
+		GrowthRateLimitMBPerSec: 4,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -327,6 +337,9 @@ func TestRAMRateLimitDoesNotBankCreditAtTarget(t *testing.T) {
 	if got := stressor.limitTargetChangeAt(10, base.Add(10*time.Second)); got != 10 {
 		t.Fatalf("target=%d want=10 while already at target", got)
 	}
+	if got := stressor.limitTargetChangeAt(100, base.Add(10*time.Second)); got != 10 {
+		t.Fatalf("target=%d want=10 while initializing a new direction", got)
+	}
 	if got := stressor.limitTargetChangeAt(100, base.Add(10250*time.Millisecond)); got != 11 {
 		t.Fatalf("target=%d want=11 after 250ms, idle time must not create a burst", got)
 	}
@@ -334,9 +347,9 @@ func TestRAMRateLimitDoesNotBankCreditAtTarget(t *testing.T) {
 
 func TestRAMRateLimitThrottlesShrinkByDefault(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
-		Mode:              ModeFixed,
-		SizeMB:            100,
-		RateLimitMBPerSec: 1,
+		Mode:                     ModeFixed,
+		SizeMB:                   100,
+		ReleaseRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -345,6 +358,7 @@ func TestRAMRateLimitThrottlesShrinkByDefault(t *testing.T) {
 	base := time.Now()
 	stressor.currentMB = 100
 	stressor.rateLastAt = base
+	stressor.rateDirection = -1
 	if got := stressor.limitTargetChangeAt(10, base.Add(500*time.Millisecond)); got != 100 {
 		t.Fatalf("target=%d want=100 before one full MB accrues", got)
 	}
@@ -353,12 +367,12 @@ func TestRAMRateLimitThrottlesShrinkByDefault(t *testing.T) {
 	}
 }
 
-func TestRAMImmediateShrinkBypassesRateLimitAndResetsCredit(t *testing.T) {
+func TestRAMGrowthAndReleaseUseIndependentRates(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
-		Mode:              ModeFixed,
-		SizeMB:            100,
-		RateLimitMBPerSec: 1,
-		ImmediateShrink:   true,
+		Mode:                     ModeFixed,
+		SizeMB:                   100,
+		GrowthRateLimitMBPerSec:  1,
+		ReleaseRateLimitMBPerSec: 10,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -367,20 +381,16 @@ func TestRAMImmediateShrinkBypassesRateLimitAndResetsCredit(t *testing.T) {
 	base := time.Now()
 	stressor.currentMB = 100
 	stressor.rateLastAt = base
-	stressor.rateCreditMB = 10
-	if got := stressor.limitTargetChangeAt(10, base.Add(time.Millisecond)); got != 10 {
-		t.Fatalf("immediate shrink target=%d want=10", got)
+	stressor.rateDirection = -1
+	if got := stressor.limitTargetChangeAt(10, base.Add(500*time.Millisecond)); got != 95 {
+		t.Fatalf("release target=%d want=95 after half a second", got)
 	}
-	if stressor.rateCreditMB != 0 {
-		t.Fatalf("rate credit=%f want=0 after immediate shrink", stressor.rateCreditMB)
+	stressor.currentMB = 95
+	if got := stressor.limitTargetChangeAt(100, base.Add(time.Second)); got != 95 {
+		t.Fatalf("direction change target=%d want=95 with reset credit", got)
 	}
-
-	stressor.currentMB = 10
-	if got := stressor.limitTargetChangeAt(100, base.Add(500*time.Millisecond)); got != 10 {
-		t.Fatalf("growth target=%d want=10 before one full MB accrues", got)
-	}
-	if got := stressor.limitTargetChangeAt(100, base.Add(time.Second+time.Millisecond)); got != 11 {
-		t.Fatalf("growth target=%d want=11 after one second", got)
+	if got := stressor.limitTargetChangeAt(100, base.Add(2*time.Second)); got != 96 {
+		t.Fatalf("growth target=%d want=96 after one second", got)
 	}
 }
 
@@ -417,9 +427,9 @@ func TestRAMUnlimitedRateAppliesTargetImmediately(t *testing.T) {
 
 func TestRAMStatusSeparatesRequestedLimitedAndCurrentTargets(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
-		Mode:              ModeFixed,
-		SizeMB:            100,
-		RateLimitMBPerSec: 1,
+		Mode:                    ModeFixed,
+		SizeMB:                  100,
+		GrowthRateLimitMBPerSec: 1,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -495,11 +505,11 @@ func TestRAMUpdateTargetGrowsAndShrinksRunningFixedStressor(t *testing.T) {
 
 func TestRAMUpdateTargetPreservesRateLimit(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
-		Mode:              ModeFixed,
-		SizeMB:            1,
-		BlockMB:           1,
-		ControlInterval:   10 * time.Millisecond,
-		RateLimitMBPerSec: 10,
+		Mode:                    ModeFixed,
+		SizeMB:                  1,
+		BlockMB:                 1,
+		ControlInterval:         10 * time.Millisecond,
+		GrowthRateLimitMBPerSec: 10,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
@@ -534,7 +544,6 @@ func TestRAMUpdateTargetInterruptsGrowthBeforeFollowingOldTarget(t *testing.T) {
 		SizeMB:          1,
 		BlockMB:         64,
 		ControlInterval: time.Hour,
-		ImmediateShrink: true,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)
@@ -704,7 +713,6 @@ func TestRAMUpdateTargetConcurrentWithStop(t *testing.T) {
 		SizeMB:          1,
 		BlockMB:         1,
 		ControlInterval: time.Millisecond,
-		ImmediateShrink: true,
 	})
 	if err != nil {
 		t.Fatalf("NewRAMStressor: %v", err)

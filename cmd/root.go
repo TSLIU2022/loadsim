@@ -7,14 +7,22 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var rootCmd = &cobra.Command{
-	Use:           "loadsim",
-	Short:         "LoadSim resource occupancy tool for CPU, RAM, and combo scenarios",
-	Long:          "LoadSim is a resource occupancy CLI for creating controllable CPU, RAM, and combined resource scenarios.",
-	Args:          cobra.NoArgs,
-	SilenceUsage:  true,
-	SilenceErrors: true,
+func newRootCommand() *cobra.Command {
+	command := &cobra.Command{
+		Use:           "loadsim",
+		Short:         "LoadSim production resource filler and test load generator",
+		Long:          "LoadSim keeps visible CPU and memory use inside production bands, or generates explicit test load in isolated environments.",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(command *cobra.Command, args []string) error {
+			return command.Help()
+		},
+	}
+	return command
 }
+
+var rootCmd = newRootCommand()
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {

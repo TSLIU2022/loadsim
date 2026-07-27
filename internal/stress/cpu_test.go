@@ -49,6 +49,7 @@ func newTestCPUStressor(t *testing.T, config CPUConfig, capacity cpuCapacity) *C
 		t.Fatalf("unexpected error: %v", err)
 	}
 	stressor.sampleProcessCPU = newIdleProcessCPUSampler()
+	stressor.setupScheduler = func(CPUWorkerScheduler) error { return nil }
 	stressor.setupWorkerNice = func(int) error { return nil }
 	return stressor
 }
@@ -69,6 +70,16 @@ func TestNewCPUStressorValidation(t *testing.T) {
 				Cores:   2,
 			},
 			capacity: defaultTestCPUCapacity,
+		},
+		{
+			name: "invalid worker scheduler",
+			cfg: CPUConfig{
+				Mode:            ModeFixed,
+				Percent:         50,
+				WorkerScheduler: "realtime",
+			},
+			capacity: defaultTestCPUCapacity,
+			wantErr:  true,
 		},
 		{
 			name: "fixed invalid percent",
@@ -1099,6 +1110,74 @@ func TestCPUWorkerPrioritySetupFailureFailsStartClosed(t *testing.T) {
 	}
 	if lifecycle != cpuLifecycleFailed {
 		t.Fatalf("lifecycle after setup failure = %v want failed", lifecycle)
+	}
+	if err := stressor.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestCPUIdleSchedulerSkipsNiceSetup(t *testing.T) {
+	stressor := newTestCPUStressor(t, CPUConfig{
+		Mode:            ModeFixed,
+		Scope:           ScopeWorkers,
+		IdleMode:        IdleModePark,
+		Percent:         0,
+		Cores:           1,
+		WorkerScheduler: WorkerSchedulerIdle,
+	}, defaultTestCPUCapacity)
+
+	schedulerCalls := 0
+	stressor.setupScheduler = func(scheduler CPUWorkerScheduler) error {
+		schedulerCalls++
+		if scheduler != WorkerSchedulerIdle {
+			t.Fatalf("scheduler=%q want idle", scheduler)
+		}
+		return nil
+	}
+	stressor.setupWorkerNice = func(int) error {
+		t.Fatal("idle scheduler unexpectedly applied nice")
+		return nil
+	}
+	if err := stressor.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := stressor.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if schedulerCalls != 1 {
+		t.Fatalf("scheduler setup calls=%d want 1", schedulerCalls)
+	}
+	if status := stressor.Status(); status.WorkerScheduler != WorkerSchedulerIdle {
+		t.Fatalf("status scheduler=%q want idle", status.WorkerScheduler)
+	}
+}
+
+func TestCPUWorkerSchedulerFailureFailsStartClosed(t *testing.T) {
+	stressor := newTestCPUStressor(t, CPUConfig{
+		Mode:            ModeFixed,
+		Scope:           ScopeWorkers,
+		IdleMode:        IdleModePark,
+		Percent:         0,
+		Cores:           2,
+		WorkerScheduler: WorkerSchedulerIdle,
+	}, defaultTestCPUCapacity)
+	stressor.setupScheduler = func(CPUWorkerScheduler) error {
+		return errors.New("sched idle denied")
+	}
+
+	err := stressor.Start()
+	if err == nil || !strings.Contains(err.Error(), "sched idle denied") {
+		t.Fatalf("Start error=%v", err)
+	}
+	stressor.lock.RLock()
+	workerCount := len(stressor.workers)
+	lifecycle := stressor.lifecycle
+	stressor.lock.RUnlock()
+	if workerCount != 0 {
+		t.Fatalf("workers after scheduler failure=%d want 0", workerCount)
+	}
+	if lifecycle != cpuLifecycleFailed {
+		t.Fatalf("lifecycle=%v want failed", lifecycle)
 	}
 	if err := stressor.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
