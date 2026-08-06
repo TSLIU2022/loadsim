@@ -126,6 +126,7 @@ type CPUStressor struct {
 
 	lock             sync.RWMutex
 	stopOnce         sync.Once
+	stopRequested    atomic.Bool
 	stopCh           chan struct{}
 	context          context.Context
 	cancel           context.CancelFunc
@@ -158,8 +159,9 @@ type CPUStressor struct {
 }
 
 type cpuWorker struct {
-	duty atomic.Uint32
-	stop chan struct{}
+	duty          atomic.Uint32
+	stopRequested atomic.Bool
+	stop          chan struct{}
 }
 
 func NewCPUStressor(config CPUConfig) (*CPUStressor, error) {
@@ -459,6 +461,7 @@ func (s *CPUStressor) failStartLocked() {
 
 func (s *CPUStressor) Stop() error {
 	s.stopOnce.Do(func() {
+		s.stopRequested.Store(true)
 		s.lock.Lock()
 		s.lifecycle = cpuLifecycleStopped
 		close(s.stopCh)
@@ -892,6 +895,7 @@ func (s *CPUStressor) ensureWorkersLocked(count int) error {
 			defer s.workerWG.Done()
 			runCPUWorker(
 				s.stopCh,
+				&s.stopRequested,
 				w,
 				s.config.Cycle,
 				s.workerScheduler,
@@ -915,6 +919,7 @@ func (s *CPUStressor) trimWorkersLocked(count int) {
 	}
 	for len(s.workers) > count {
 		last := s.workers[len(s.workers)-1]
+		last.stopRequested.Store(true)
 		close(last.stop)
 		s.workers = s.workers[:len(s.workers)-1]
 	}
@@ -922,6 +927,7 @@ func (s *CPUStressor) trimWorkersLocked(count int) {
 
 func runCPUWorker(
 	stop <-chan struct{},
+	stopRequested *atomic.Bool,
 	worker *cpuWorker,
 	cycle time.Duration,
 	workerScheduler CPUWorkerScheduler,
@@ -972,12 +978,20 @@ func runCPUWorker(
 				return
 			}
 		case duty >= dutyScale:
-			if !busyUntil(stop, worker.stop, time.Now().Add(cycle)) {
+			if !busyUntil(
+				stopRequested,
+				&worker.stopRequested,
+				time.Now().Add(cycle),
+			) {
 				return
 			}
 		default:
 			busyFor := time.Duration(int64(cycle) * int64(duty) / dutyScale)
-			if busyFor > 0 && !busyUntil(stop, worker.stop, time.Now().Add(busyFor)) {
+			if busyFor > 0 && !busyUntil(
+				stopRequested,
+				&worker.stopRequested,
+				time.Now().Add(busyFor),
+			) {
 				return
 			}
 			if rest := cycle - busyFor; rest > 0 && !sleepOrStop(stop, worker.stop, rest) {
@@ -987,15 +1001,19 @@ func runCPUWorker(
 	}
 }
 
-func busyUntil(stop <-chan struct{}, workerStop <-chan struct{}, deadline time.Time) bool {
+func busyUntil(
+	stopRequested *atomic.Bool,
+	workerStopRequested *atomic.Bool,
+	deadline time.Time,
+) bool {
 	var sink float64
 	for time.Now().Before(deadline) {
-		select {
-		case <-stop:
+		// Channel polling here used to lock the same global stop channel on
+		// every iteration. With many workers that serialized the hot path and
+		// prevented CPU load from scaling across cores. Atomic reads keep stop
+		// checks prompt without making active workers contend on a shared lock.
+		if stopRequested.Load() || workerStopRequested.Load() {
 			return false
-		case <-workerStop:
-			return false
-		default:
 		}
 
 		sink += math.Sqrt(12345.6789)

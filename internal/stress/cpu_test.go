@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -1782,5 +1783,37 @@ func TestCPUStatusCountsOnlyActiveWorkers(t *testing.T) {
 	}
 	if status.MaxWorkers != 4 {
 		t.Fatalf("status max workers = %d want 4", status.MaxWorkers)
+	}
+}
+
+func TestBusyUntilObservesAtomicStopFlags(t *testing.T) {
+	tests := []struct {
+		name       string
+		stopGlobal bool
+		stopWorker bool
+	}{
+		{name: "global stop", stopGlobal: true},
+		{name: "worker stop", stopWorker: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var global atomic.Bool
+			var worker atomic.Bool
+			global.Store(test.stopGlobal)
+			worker.Store(test.stopWorker)
+
+			if busyUntil(&global, &worker, time.Now().Add(time.Second)) {
+				t.Fatal("busyUntil ignored a requested stop")
+			}
+		})
+	}
+}
+
+func TestBusyUntilCompletesExpiredDeadline(t *testing.T) {
+	var global atomic.Bool
+	var worker atomic.Bool
+	if !busyUntil(&global, &worker, time.Now().Add(-time.Millisecond)) {
+		t.Fatal("busyUntil reported a stop when only the deadline expired")
 	}
 }
