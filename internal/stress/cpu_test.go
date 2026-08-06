@@ -493,7 +493,7 @@ func TestCPUStressorSystemScopeControlsVisibleUtilization(t *testing.T) {
 	}
 }
 
-func TestCPUStressorSystemScopeAcceptsRawQuotaBurstAndBacksOff(t *testing.T) {
+func TestCPUStressorSystemScopeAcceptsRawCapacityBurstAndBacksOff(t *testing.T) {
 	stressor, err := newCPUStressorWithSystemAccounting(
 		CPUConfig{
 			Mode:            ModeFixed,
@@ -509,8 +509,6 @@ func TestCPUStressorSystemScopeAcceptsRawQuotaBurstAndBacksOff(t *testing.T) {
 			hostCPUs:     2,
 			affinityCPUs: 2,
 			gomaxprocs:   1,
-			quotaCPUs:    0.5,
-			quotaLimited: true,
 			processCPUs:  0.5,
 			maxWorkers:   1,
 		}),
@@ -560,11 +558,11 @@ func TestCPUStressorSystemScopeAcceptsRawQuotaBurstAndBacksOff(t *testing.T) {
 	stressor.lock.Unlock()
 
 	if !stressor.controlTick() {
-		t.Fatal("system controller rejected a bounded raw quota burst")
+		t.Fatal("system controller rejected a bounded raw capacity burst")
 	}
 	status := stressor.Status()
 	if status.LastScopePercent != 150 || status.AppliedPercent != 0 {
-		t.Fatalf("quota-burst status=%+v", status)
+		t.Fatalf("capacity-burst status=%+v", status)
 	}
 }
 
@@ -751,8 +749,6 @@ func TestSameCPUCapacityChecksEverySafetyInput(t *testing.T) {
 		hostCPUs:     8,
 		affinityCPUs: 4,
 		gomaxprocs:   3,
-		quotaCPUs:    1.5,
-		quotaLimited: true,
 		processCPUs:  1.5,
 		maxWorkers:   2,
 	}
@@ -763,8 +759,6 @@ func TestSameCPUCapacityChecksEverySafetyInput(t *testing.T) {
 		{name: "host CPUs", change: func(value *cpuCapacity) { value.hostCPUs-- }},
 		{name: "affinity", change: func(value *cpuCapacity) { value.affinityCPUs-- }},
 		{name: "GOMAXPROCS", change: func(value *cpuCapacity) { value.gomaxprocs-- }},
-		{name: "quota mode", change: func(value *cpuCapacity) { value.quotaLimited = false }},
-		{name: "quota amount", change: func(value *cpuCapacity) { value.quotaCPUs = 1 }},
 		{name: "effective CPUs", change: func(value *cpuCapacity) { value.processCPUs = 1 }},
 		{name: "worker ceiling", change: func(value *cpuCapacity) { value.maxWorkers = 1 }},
 	}
@@ -1277,7 +1271,7 @@ func TestCPUPercentConversionHelpersUseEffectiveCapacity(t *testing.T) {
 	}
 
 	if got := workerPercentToHostPercent(100, 4, capacity); got != 1.25 {
-		t.Fatalf("quota-capped worker percent got %.2f want 1.25", got)
+		t.Fatalf("capacity-capped worker percent got %.2f want 1.25", got)
 	}
 
 	if got := workerCapacityPercentToDrivePercent(50, 4, capacity); got != 25 {
@@ -1285,13 +1279,11 @@ func TestCPUPercentConversionHelpersUseEffectiveCapacity(t *testing.T) {
 	}
 }
 
-func TestWorkersScopeScalesFractionalQuotaTarget(t *testing.T) {
+func TestWorkersScopeScalesFractionalCapacityTarget(t *testing.T) {
 	capacity := cpuCapacity{
 		hostCPUs:     8,
 		affinityCPUs: 8,
 		gomaxprocs:   1,
-		quotaCPUs:    0.5,
-		quotaLimited: true,
 		processCPUs:  0.5,
 		maxWorkers:   1,
 	}
@@ -1425,13 +1417,11 @@ func TestNextHostAdaptiveAppliedPercentIntegratesActualDeliveryError(t *testing.
 	}
 }
 
-func TestNextScopeAdaptiveAppliedPercentHonorsFractionalQuotaCeiling(t *testing.T) {
+func TestNextScopeAdaptiveAppliedPercentHonorsFractionalCapacityCeiling(t *testing.T) {
 	capacity := cpuCapacity{
 		hostCPUs:     8,
 		affinityCPUs: 8,
 		gomaxprocs:   1,
-		quotaCPUs:    0.5,
-		quotaLimited: true,
 		processCPUs:  0.5,
 		maxWorkers:   1,
 	}
@@ -1447,7 +1437,7 @@ func TestNextScopeAdaptiveAppliedPercentHonorsFractionalQuotaCeiling(t *testing.
 		100,
 	)
 	if saturated != 50 {
-		t.Fatalf("fractional quota saturation = %.1f want 50.0", saturated)
+		t.Fatalf("fractional capacity saturation = %.1f want 50.0", saturated)
 	}
 
 	backoff := nextScopeAdaptiveAppliedPercent(
@@ -1475,11 +1465,11 @@ func TestNextScopeAdaptiveAppliedPercentHonorsFractionalQuotaCeiling(t *testing.
 		100,
 	)
 	if burstBackoff != 0 {
-		t.Fatalf("quota-burst backoff = %.1f want 0.0", burstBackoff)
+		t.Fatalf("capacity-burst backoff = %.1f want 0.0", burstBackoff)
 	}
 }
 
-func TestHostControllerAppliesFractionalQuotaCeilingAndBacksOff(t *testing.T) {
+func TestHostControllerAppliesFractionalCapacityCeilingAndBacksOff(t *testing.T) {
 	samples := []float64{0, 60}
 	sampleIndex := 0
 	stressor, err := newCPUStressor(
@@ -1496,8 +1486,6 @@ func TestHostControllerAppliesFractionalQuotaCeilingAndBacksOff(t *testing.T) {
 			hostCPUs:     2,
 			affinityCPUs: 2,
 			gomaxprocs:   1,
-			quotaCPUs:    0.5,
-			quotaLimited: true,
 			processCPUs:  0.5,
 			maxWorkers:   1,
 		}),
@@ -1552,38 +1540,6 @@ func TestLinuxCPUListParser(t *testing.T) {
 		t.Run(value, func(t *testing.T) {
 			if _, err := parseLinuxCPUList(value); err == nil {
 				t.Fatalf("expected %q to fail", value)
-			}
-		})
-	}
-}
-
-func TestCgroupV2CPUMaxParser(t *testing.T) {
-	tests := []struct {
-		value       string
-		wantQuota   float64
-		wantLimited bool
-		wantErr     bool
-	}{
-		{value: "max 100000", wantLimited: false},
-		{value: "150000 100000", wantQuota: 1.5, wantLimited: true},
-		{value: "0 100000", wantErr: true},
-		{value: "garbage", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.value, func(t *testing.T) {
-			gotQuota, gotLimited, err := parseCgroupV2CPUMax(tt.value)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("error = %v wantErr=%v", err, tt.wantErr)
-			}
-			if gotQuota != tt.wantQuota || gotLimited != tt.wantLimited {
-				t.Fatalf(
-					"quota/limited = %.2f/%v want %.2f/%v",
-					gotQuota,
-					gotLimited,
-					tt.wantQuota,
-					tt.wantLimited,
-				)
 			}
 		})
 	}

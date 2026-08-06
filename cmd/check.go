@@ -90,20 +90,20 @@ func runCheck(options checkOptions) error {
 	}
 	cpuInfo, err := stress.InspectVisibleSystemCPU()
 	if err != nil {
-		return fmt.Errorf("inspect visible system CPU: %w", err)
+		return fmt.Errorf("inspect whole-machine CPU: %w", err)
 	}
 	sample, err := stress.SampleVisibleSystemCPU(
 		context.Background(),
 		sampleDuration,
 	)
 	if err != nil {
-		return fmt.Errorf("sample visible system CPU: %w", err)
+		return fmt.Errorf("sample whole-machine CPU: %w", err)
 	}
 	if sample.Source != cpuInfo.Source ||
 		sample.BoundaryID != cpuInfo.BoundaryID ||
 		sample.BoundaryKind != cpuInfo.BoundaryKind ||
 		sample.CPUs != cpuInfo.CPUs {
-		return fmt.Errorf("visible system CPU boundary changed during check")
+		return fmt.Errorf("whole-machine CPU boundary changed during check")
 	}
 
 	idleScheduler := "not-tested"

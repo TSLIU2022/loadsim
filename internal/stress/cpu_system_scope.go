@@ -5,19 +5,18 @@ import (
 	"time"
 )
 
-// VisibleSystemCPUBoundaryKind describes how the visible accounting root
-// relates to the current cgroup membership.
+// VisibleSystemCPUBoundaryKind describes the aggregate CPU accounting boundary.
 type VisibleSystemCPUBoundaryKind string
 
 const (
 	VisibleSystemCPUBoundaryUnknown       VisibleSystemCPUBoundaryKind = "unknown"
+	VisibleSystemCPUBoundaryHost          VisibleSystemCPUBoundaryKind = "host"
 	VisibleSystemCPUBoundarySelf          VisibleSystemCPUBoundaryKind = "self"
 	VisibleSystemCPUBoundaryAncestor      VisibleSystemCPUBoundaryKind = "ancestor"
 	VisibleSystemCPUBoundaryNamespaceRoot VisibleSystemCPUBoundaryKind = "namespace-root"
 )
 
-// VisibleSystemCPUSample describes aggregate CPU use at the current visible
-// cgroup filesystem root.
+// VisibleSystemCPUSample describes aggregate whole-machine CPU use.
 type VisibleSystemCPUSample struct {
 	Source       string
 	BoundaryID   string
@@ -28,8 +27,8 @@ type VisibleSystemCPUSample struct {
 	Elapsed      time.Duration
 }
 
-// VisibleSystemCPUInfo describes the current aggregate CPU accounting
-// boundary without waiting for a utilization sample.
+// VisibleSystemCPUInfo describes the whole-machine CPU accounting boundary
+// without waiting for a utilization sample.
 type VisibleSystemCPUInfo struct {
 	Source       string
 	BoundaryID   string
@@ -37,14 +36,14 @@ type VisibleSystemCPUInfo struct {
 	CPUs         float64
 }
 
-// InspectVisibleSystemCPU validates and describes the current visible cgroup
-// CPU accounting boundary without waiting for a utilization sample.
+// InspectVisibleSystemCPU validates and describes whole-machine CPU accounting
+// without waiting for a utilization sample.
 func InspectVisibleSystemCPU() (VisibleSystemCPUInfo, error) {
 	return inspectVisibleSystemCPU()
 }
 
-// SampleVisibleSystemCPU samples aggregate CPU use at the current visible
-// cgroup filesystem root for the requested interval.
+// SampleVisibleSystemCPU samples aggregate whole-machine CPU use for the
+// requested interval.
 func SampleVisibleSystemCPU(
 	ctx context.Context,
 	sampleDuration time.Duration,

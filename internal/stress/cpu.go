@@ -105,8 +105,6 @@ type cpuCapacity struct {
 	hostCPUs     int
 	affinityCPUs int
 	gomaxprocs   int
-	quotaCPUs    float64
-	quotaLimited bool
 	processCPUs  float64
 	maxWorkers   int
 }
@@ -323,17 +321,17 @@ func newCPUStressorWithSystemAccounting(
 	}
 	if config.Scope == ScopeSystem {
 		if inspectSystemCPU == nil || sampleSystemCPU == nil {
-			return nil, fmt.Errorf("visible system CPU accounting is not configured")
+			return nil, fmt.Errorf("whole-machine CPU accounting is not configured")
 		}
 		info, err := inspectSystemCPU()
 		if err != nil {
-			return nil, fmt.Errorf("inspect visible system CPU boundary: %w", err)
+			return nil, fmt.Errorf("inspect whole-machine CPU boundary: %w", err)
 		}
 		if info.Source == "" ||
 			info.BoundaryID == "" ||
 			!isFinite(info.CPUs) ||
 			info.CPUs <= 0 {
-			return nil, fmt.Errorf("visible system CPU boundary is invalid")
+			return nil, fmt.Errorf("whole-machine CPU boundary is invalid")
 		}
 		scopeCPUs = info.CPUs
 		accountingSource = info.Source
@@ -617,18 +615,18 @@ func (s *CPUStressor) verifySystemCPUBoundary() error {
 		return nil
 	}
 	if s.inspectSystemCPU == nil {
-		return fmt.Errorf("visible system CPU inspector is not configured")
+		return fmt.Errorf("whole-machine CPU inspector is not configured")
 	}
 	info, err := s.inspectSystemCPU()
 	if err != nil {
-		return fmt.Errorf("inspect visible system CPU boundary: %w", err)
+		return fmt.Errorf("inspect whole-machine CPU boundary: %w", err)
 	}
 	if info.Source != s.accountingSource ||
 		info.BoundaryID != s.boundaryID ||
 		info.BoundaryKind != s.boundaryKind ||
 		info.CPUs != s.scopeCPUs {
 		return fmt.Errorf(
-			"visible system CPU boundary changed: startup source=%s id=%s kind=%s cpus=%.3f; current source=%s id=%s kind=%s cpus=%.3f",
+			"whole-machine CPU boundary changed: startup source=%s id=%s kind=%s cpus=%.3f; current source=%s id=%s kind=%s cpus=%.3f",
 			s.accountingSource,
 			s.boundaryID,
 			s.boundaryKind,
@@ -770,7 +768,7 @@ func (s *CPUStressor) sampleScopeCPU(
 		return cpuScopeSample{percent: percent}, err
 	}
 	if s.sampleSystemCPU == nil {
-		return cpuScopeSample{}, fmt.Errorf("visible system CPU sampler is not configured")
+		return cpuScopeSample{}, fmt.Errorf("whole-machine CPU sampler is not configured")
 	}
 	sample, err := s.sampleSystemCPU(ctx, sampleDuration)
 	if err != nil {
@@ -781,7 +779,7 @@ func (s *CPUStressor) sampleScopeCPU(
 		sample.BoundaryKind != s.boundaryKind ||
 		sample.CPUs != s.scopeCPUs {
 		return cpuScopeSample{}, fmt.Errorf(
-			"visible system CPU boundary changed during sample: startup source=%s id=%s kind=%s cpus=%.3f; sample source=%s id=%s kind=%s cpus=%.3f",
+			"whole-machine CPU boundary changed during sample: startup source=%s id=%s kind=%s cpus=%.3f; sample source=%s id=%s kind=%s cpus=%.3f",
 			s.accountingSource,
 			s.boundaryID,
 			s.boundaryKind,
@@ -1083,23 +1081,16 @@ func sameCPUCapacity(first, second cpuCapacity) bool {
 	return first.hostCPUs == second.hostCPUs &&
 		first.affinityCPUs == second.affinityCPUs &&
 		first.gomaxprocs == second.gomaxprocs &&
-		first.quotaLimited == second.quotaLimited &&
-		(!first.quotaLimited || first.quotaCPUs == second.quotaCPUs) &&
 		first.processCPUs == second.processCPUs &&
 		first.maxWorkers == second.maxWorkers
 }
 
 func formatCPUCapacity(capacity cpuCapacity) string {
-	quota := "unlimited"
-	if capacity.quotaLimited {
-		quota = fmt.Sprintf("%.3f", capacity.quotaCPUs)
-	}
 	return fmt.Sprintf(
-		"host_cpus=%d affinity_cpus=%d gomaxprocs=%d cgroup_quota=%s process_cpus=%.3f max_workers=%d",
+		"host_cpus=%d affinity_cpus=%d gomaxprocs=%d process_cpus=%.3f max_workers=%d",
 		capacity.hostCPUs,
 		capacity.affinityCPUs,
 		capacity.gomaxprocs,
-		quota,
 		capacity.processCPUs,
 		capacity.maxWorkers,
 	)
@@ -1130,27 +1121,14 @@ func detectCPUCapacity() (cpuCapacity, error) {
 	}
 
 	processCPUs := float64(availableCPUs)
-	var quotaCPUs float64
-	var quotaLimited bool
-	if runtime.GOOS == "linux" {
-		quotaCPUs, quotaLimited, err = linuxCgroupCPUQuota()
-		if err != nil {
-			return cpuCapacity{}, err
-		}
-		if quotaLimited {
-			processCPUs = math.Min(processCPUs, quotaCPUs)
-		}
-	}
 	if !isFinite(processCPUs) || processCPUs <= 0 {
-		return cpuCapacity{}, fmt.Errorf("cgroup CPU quota leaves no usable CPU capacity")
+		return cpuCapacity{}, fmt.Errorf("process CPU capacity is invalid")
 	}
 
 	return cpuCapacity{
 		hostCPUs:     hostCPUs,
 		affinityCPUs: affinityCPUs,
 		gomaxprocs:   gomaxprocs,
-		quotaCPUs:    quotaCPUs,
-		quotaLimited: quotaLimited,
 		processCPUs:  processCPUs,
 		maxWorkers:   maxInt(1, int(math.Ceil(processCPUs))),
 	}, nil

@@ -2,6 +2,18 @@
 
 这里记录 LoadSim 每个公开版本对使用者有影响的主要变化。完整发布正文、校验文件和二进制产物以 [GitHub Releases](https://github.com/fanderchan/loadsim/releases) 为准。
 
+## [v0.6.0] - 2026-08-06
+
+这次更新把生产 CPU 填充收敛为物理机和普通虚拟机的整机控制，移除复杂且在部分虚拟化环境中不可靠的 CPU cgroup 记账路径。
+
+### 主要变化
+
+- CPU `fill` 与 `check` 改用 `/proc/schedstat` 汇总整机每个逻辑 CPU 的任务运行时间，避开当前虚拟化环境中 `/proc/stat` 和 cgroup 根计数少记 `SCHED_IDLE` 工作时间的问题。
+- CPU 控制口径明确收敛为物理机和普通虚拟机整机，不再解析 cgroup v1/v2 的 CPU 用量、quota 或 cpuset 文件；worker 容量只校验进程 affinity 与 `GOMAXPROCS`。
+- 新增 schedstat 版本、逻辑 CPU 集合、计数器单调性、采样时窗和读取耗时校验，关键统计不连续时失败关闭。
+- 修复多 CPU worker 在热循环中反复轮询同一个停止 channel 所造成的全局锁竞争，改用原子停止标记。
+- 状态输出的 CPU 来源固定为 `proc:schedstat`，边界类型固定为 `host`；内存仍独立检查宿主机及可见的有限 cgroup 约束。
+
 ## [v0.5.0] - 2026-07-28
 
 这是一次不保留旧命令兼容性的产品重构，目标是把生产资源填充与实验室造压彻底分开，并让 CPU、内存使用同一套区间表达。
@@ -47,6 +59,7 @@
 - `v0.3.0-beta.1`：首次公开 beta，统一 `LoadSim` / `loadsim` 命名并完成三个核心命令。
 - `v0.3.0-beta.2`：增加官方 `linux/amd64` 产物的 CentOS 7 启动验证。
 
+[v0.6.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.6.0
 [v0.5.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.5.0
 [v0.4.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.4.0
 [v0.3.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.3.0

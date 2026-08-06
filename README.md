@@ -6,9 +6,9 @@ LoadSim 是面向 Linux 的资源填充与负载模拟工具。它的主要用�
 
 公开命令按使用意图划分：
 
-- `loadsim fill`：生产填充，把可见系统的总 CPU、总内存或两者维持在闭区间内。
+- `loadsim fill`：生产填充，把整机总 CPU、总内存或两者维持在闭区间内。
 - `loadsim stress`：测试造压，生成明确的固定或周期波动负载。
-- `loadsim check`：只读检查记账边界；加 `--active` 时额外验证一次 `SCHED_IDLE`。
+- `loadsim check`：只读检查整机 CPU 采样与内存保护边界；加 `--active` 时额外验证一次 `SCHED_IDLE`。
 - `loadsim version`：显示版本。
 
 旧的 `cpu`、`ram`、`combo` 参数体系已经移除。CPU 与内存都使用 `LOW:HIGH` 表达总使用率区间，避免同一个目标出现两套不对称写法。
@@ -19,9 +19,10 @@ LoadSim 是面向 Linux 的资源填充与负载模拟工具。它的主要用�
 ## 系统要求
 
 - Linux `amd64` 或 `arm64`
+- 可读取 v10–v17 `/proc/schedstat` 的物理机或普通虚拟机
 - 从源码构建需要 `go.mod` 指定的 Go 版本
 
-程序运行本身通常不需要 root。设置 `oom_score_adj=1000`、安装到系统目录或某些受限容器策略可能需要额外权限；权限不足时 LoadSim 会拒绝启动，不会静默降低保护。
+CPU 填充只面向宿主机操作系统，不支持容器内运行。程序运行本身通常不需要 root。设置 `oom_score_adj=1000` 或安装到系统目录可能需要额外权限；权限不足时 LoadSim 会拒绝启动，不会静默降低保护。
 
 ## 安装
 
@@ -80,7 +81,7 @@ GOTOOLCHAIN=auto go build -o loadsim .
 
 ### 只填充 CPU
 
-下面的命令让当前可见系统边界的总 CPU 使用率保持在 30%–50% 闭区间：
+下面的命令让整台物理机或虚拟机的总 CPU 使用率保持在 30%–50% 闭区间：
 
 ```bash
 loadsim fill \
@@ -96,7 +97,9 @@ loadsim fill \
 - 高于 50% 时逐步降低驱动力。
 - `--duration-sec 0` 表示持续运行；默认值为 60 秒，防止误操作后无限造压。
 
-`fill` 固定使用经过边界校验的 `system` 口径：cgroup v2 读取 `cpu.stat`，cgroup v1 读取 `cpuacct.usage`。它不会使用在部分虚拟化内核中可能少记低优先级 CPU 时间的 `/proc/stat`。
+`fill` 固定使用整机 `system` 口径：从 `/proc/schedstat` 读取每个逻辑 CPU 的任务运行时间并汇总，不读取 CPU cgroup，也不使用在部分虚拟化内核中可能少记低优先级 CPU 时间的 `/proc/stat`。启动和运行期间会校验 schedstat 版本、逻辑 CPU 集合、计数器单调性和读取耗时；无法证明采样连续可靠时失败关闭。
+
+LoadSim 自身能使用的 worker 数量只取进程 CPU affinity 与 `GOMAXPROCS` 的较小值，并在运行期间重新检查。CPU 路径不解析 cgroup v1/v2 的用量、quota 或 cpuset 文件。
 
 CPU worker 默认使用 Linux `SCHED_IDLE`。普通业务即使也是 `nice=19`，仍然比 `SCHED_IDLE` worker 优先。每个 worker 都会在独立 OS 线程上设置并读回调度策略；内核、容器安全策略或权限不支持时，命令失败关闭。
 
@@ -110,7 +113,7 @@ loadsim fill \
   --duration-sec 0
 ```
 
-普通调度下 `nice=19` 只能提供相对权重，不能保证同为 `nice=19` 的业务一定优先。跨 cgroup 竞争还受 `cpu.weight`、`cpu.shares` 和 quota 影响。
+普通调度下 `nice=19` 只能提供相对权重，不能保证同为 `nice=19` 的业务一定优先。
 
 CPU 默认每 3 秒控制一次、采样 1 秒、每轮最多改变 5 个百分点：
 
@@ -175,7 +178,7 @@ loadsim fill \
   --status-interval-sec 5
 ```
 
-CPU 与内存各自观察同一个进程可见环境中的有效边界。任一关键探测器失败时都会停止本次填充；内存发生紧急风险时，先解除内存映射，再停止 CPU。
+CPU 观察整机调度统计；内存同时检查宿主机和进程可见的有限安全约束。任一关键探测器失败时都会停止本次填充；内存发生紧急风险时，先解除内存映射，再停止 CPU。
 
 ## 内存保护
 
@@ -225,7 +228,7 @@ loadsim check --active --json
 
 检查结果会显示：
 
-- CPU 记账来源、边界类型、匿名短 ID、有效 CPU 容量和采样使用率。
+- 整机 CPU 采样来源、匿名短 ID、逻辑 CPU 数量和采样使用率。
 - `SCHED_IDLE` 是否经过主动验证。
 - 宿主机及每个可见有限 cgroup 的总量、已用量和可用量。
 
@@ -273,15 +276,15 @@ loadsim stress \
 
 `stress` 默认使用普通调度和 `nice=0`，因为它的意图是制造明确测试负载。它仍保留内存启动预算、运行期护栏、OOM 优先牺牲和渐进释放。`--force` 只允许绕过测试负载的启动目标预算，不能关闭运行期安全水位或探测失败保护。
 
-## 物理机、VM 与容器
+## 物理机与虚拟机
 
-- 物理机或普通 VM：`fill` 通常观察整机 cgroup 记账根。
-- 容器：通常只观察当前 cgroup namespace 可见的根。要填充单个业务容器，应与业务处在同一可见记账边界。
-- 兄弟容器：LoadSim 位于独立且隔离的 cgroup namespace 时，看不到兄弟容器用量，不能据此控制整个宿主机。
-- 宿主机总量：应从宿主机运行，并用 `check` 输出确认边界。
-- 动态 quota、cpuset、affinity、`GOMAXPROCS` 或记账边界变化：CPU 控制器立即失败关闭，确认新约束后再重启。
+- CPU `fill` 只支持直接运行在物理机或普通虚拟机的宿主机操作系统中，控制口径始终是整机。
+- CPU 采样不区分 cgroup v1 和 v2，也不依赖 CPU cgroup 文件；应以 `check` 输出的 `proc:schedstat` 和 `host` 边界为准。
+- 不要在容器中运行 CPU `fill`。容器内的 `/proc/schedstat` 可能反映宿主机，而 worker 能使用的资源却受容器约束，两者不构成可靠的同一控制边界。
+- 逻辑 CPU 集合、schedstat 版本或计数器、进程 affinity、`GOMAXPROCS` 发生变化时，CPU 控制器失败关闭，确认新环境后再重启。
+- 内存保护仍会读取宿主机和可见的有限 cgroup 约束，避免忽略 systemd `MemoryMax` 等实际内存上限；这不参与 CPU 使用率采样。
 
-状态中的 `cpu_source`、`cpu_boundary`、`cpu_scope_cpus`、`memory_scope` 和 `memory_guard_scope` 才是实际控制边界。不要只根据“它运行在容器里”或“它运行在 VM 里”推断口径。
+状态中的 `cpu_source=proc:schedstat`、`cpu_boundary=host:...` 和 `cpu_scope_cpus` 表示整机 CPU 控制口径；`memory_scope` 与 `memory_guard_scope` 独立表示内存边界。
 
 ## 使用 systemd 托管
 
@@ -318,7 +321,7 @@ journalctl -u loadsim -f
 
 1. `loadsim check --active`。
 2. 只启用 CPU，使用较窄上限和 10 分钟时长，同时模拟正常业务与偶发尖刺。
-3. 检查业务延迟、CPU 记账、LoadSim 驱动力和停止后的残留。
+3. 检查业务延迟、整机 CPU 采样、LoadSim 驱动力和停止后的残留。
 4. 再启用 CPU+内存，内存绝对上限先取保守值。
 5. 检查增长、区间保持、业务变忙后的渐退、紧急水位和停止后的 RSS。
 6. 确认无异常后，才把 `--duration-sec` 改为 `0`。
@@ -330,7 +333,7 @@ journalctl -u loadsim -f
 状态行使用 `key=value`，例如：
 
 ```text
-[12:00:00] mode=fill cpu_band=30.0:50.0% cpu_scope=system cpu_scheduler=idle cpu_drive=18.0% cpu_workers=2/4 cpu_scope_cpus=4.00 cpu_source=cgroup1:cpuacct.usage cpu_boundary=ancestor:cgcpu-... cpu_observed=39.4% memory_scope=host memory_total=38.2% process_rss=9MiB
+[12:00:00] mode=fill cpu_band=30.0:50.0% cpu_scope=system cpu_scheduler=idle cpu_drive=18.0% cpu_workers=2/4 cpu_scope_cpus=4.00 cpu_source=proc:schedstat cpu_boundary=host:schedcpu-... cpu_observed=39.4% memory_scope=host memory_total=38.2% process_rss=9MiB
 ```
 
 正常达到时长或收到 `SIGINT` / `SIGTERM` 后返回成功。控制器错误、记账矛盾、边界变化、安全探测失败或紧急水位触发时返回非零。状态输出为英文是为了保持脚本字段稳定；仓库文档和发布说明使用中文。

@@ -11,7 +11,7 @@ import (
 
 func inspectVisibleSystemCPU() (VisibleSystemCPUInfo, error) {
 	return VisibleSystemCPUInfo{}, fmt.Errorf(
-		"visible system CPU inspection is unsupported on %s",
+		"whole-machine CPU inspection is unsupported on %s",
 		runtime.GOOS,
 	)
 }
@@ -21,7 +21,7 @@ func sampleVisibleSystemCPU(
 	_ time.Duration,
 ) (VisibleSystemCPUSample, error) {
 	return VisibleSystemCPUSample{}, fmt.Errorf(
-		"visible system CPU sampling is unsupported on %s",
+		"whole-machine CPU sampling is unsupported on %s",
 		runtime.GOOS,
 	)
 }
