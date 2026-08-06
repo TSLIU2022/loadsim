@@ -2,6 +2,16 @@
 
 这里记录 LoadSim 每个公开版本对使用者有影响的主要变化。完整发布正文、校验文件和二进制产物以 [GitHub Releases](https://github.com/fanderchan/loadsim/releases) 为准。
 
+## [v0.6.1] - 2026-08-06
+
+这次更新修复整机 CPU 接近满载时，调度运行时间与用户态单调时钟之间的微小计时偏差可能导致填充进程误判统计无效并退出的问题。
+
+### 主要变化
+
+- `/proc/schedstat` 整机采样允许最多 0.5% 的满载计时偏差，并把该窄幅范围内的 busy 时长与使用率一并钳制到物理容量。
+- 超过容差的计数器异常仍然失败关闭，不降低版本、CPU 集合、单调性、采样时窗和读取耗时等既有安全校验。
+- 新增 BCLinux 21.10 满载业务竞争复现值的回归测试，同时验证明显超限仍会被拒绝。
+
 ## [v0.6.0] - 2026-08-06
 
 这次更新把生产 CPU 填充收敛为物理机和普通虚拟机的整机控制，移除复杂且在部分虚拟化环境中不可靠的 CPU cgroup 记账路径。
@@ -59,6 +69,7 @@
 - `v0.3.0-beta.1`：首次公开 beta，统一 `LoadSim` / `loadsim` 命名并完成三个核心命令。
 - `v0.3.0-beta.2`：增加官方 `linux/amd64` 产物的 CentOS 7 启动验证。
 
+[v0.6.1]: https://github.com/fanderchan/loadsim/releases/tag/v0.6.1
 [v0.6.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.6.0
 [v0.5.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.5.0
 [v0.4.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.4.0

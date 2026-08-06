@@ -180,6 +180,52 @@ func TestSampleVisibleSystemCPUFromSchedstat(t *testing.T) {
 	}
 }
 
+func TestSampleVisibleSystemCPUClampsMinorSaturationOvershoot(t *testing.T) {
+	dependencies := schedstatSampleDependencies(
+		t,
+		[]string{
+			"version 16\ncpu0 0 0 0 0 0 0 1000000000 0 0\n",
+			"version 16\ncpu0 0 0 0 0 0 0 2000185924 0 0\n",
+		},
+		0,
+	)
+
+	sample, err := sampleVisibleSystemCPUFrom(
+		context.Background(),
+		time.Second,
+		dependencies,
+	)
+	if err != nil {
+		t.Fatalf("sampleVisibleSystemCPUFrom: %v", err)
+	}
+	if sample.Percent != 100 {
+		t.Fatalf("percent = %.9f want 100", sample.Percent)
+	}
+	if sample.Busy != time.Second {
+		t.Fatalf("busy = %s want 1s", sample.Busy)
+	}
+}
+
+func TestSampleVisibleSystemCPURejectsMaterialSaturationOvershoot(t *testing.T) {
+	dependencies := schedstatSampleDependencies(
+		t,
+		[]string{
+			"version 16\ncpu0 0 0 0 0 0 0 1000000000 0 0\n",
+			"version 16\ncpu0 0 0 0 0 0 0 2010000001 0 0\n",
+		},
+		0,
+	)
+
+	_, err := sampleVisibleSystemCPUFrom(
+		context.Background(),
+		time.Second,
+		dependencies,
+	)
+	if err == nil || !strings.Contains(err.Error(), "beyond 0.500% tolerance") {
+		t.Fatalf("error = %v want material saturation overshoot", err)
+	}
+}
+
 func TestSampleVisibleSystemCPUBracketsCounterReads(t *testing.T) {
 	dependencies := schedstatSampleDependencies(
 		t,
@@ -394,6 +440,7 @@ func TestCalculateLinuxSchedstatCPUPercentValidation(t *testing.T) {
 		{name: "zero elapsed", busy: 0, elapsed: 0, cpus: 1},
 		{name: "zero CPUs", busy: 0, elapsed: time.Second, cpus: 0},
 		{name: "NaN CPUs", busy: 0, elapsed: time.Second, cpus: math.NaN()},
+		{name: "capacity overflow", busy: 0, elapsed: time.Duration(math.MaxInt64), cpus: 2},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

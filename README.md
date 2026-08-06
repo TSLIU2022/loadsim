@@ -97,7 +97,7 @@ loadsim fill \
 - 高于 50% 时逐步降低驱动力。
 - `--duration-sec 0` 表示持续运行；默认值为 60 秒，防止误操作后无限造压。
 
-`fill` 固定使用整机 `system` 口径：从 `/proc/schedstat` 读取每个逻辑 CPU 的任务运行时间并汇总，不读取 CPU cgroup，也不使用在部分虚拟化内核中可能少记低优先级 CPU 时间的 `/proc/stat`。启动和运行期间会校验 schedstat 版本、逻辑 CPU 集合、计数器单调性和读取耗时；无法证明采样连续可靠时失败关闭。
+`fill` 固定使用整机 `system` 口径：从 `/proc/schedstat` 读取每个逻辑 CPU 的任务运行时间并汇总，不读取 CPU cgroup，也不使用在部分虚拟化内核中可能少记低优先级 CPU 时间的 `/proc/stat`。启动和运行期间会校验 schedstat 版本、逻辑 CPU 集合、计数器单调性和读取耗时；满载时最多容忍 0.5% 的跨时钟计时偏差并钳制到物理容量，超过该边界或无法证明采样连续可靠时仍然失败关闭。
 
 LoadSim 自身能使用的 worker 数量只取进程 CPU affinity 与 `GOMAXPROCS` 的较小值，并在运行期间重新检查。CPU 路径不解析 cgroup v1/v2 的用量、quota 或 cpuset 文件。
 

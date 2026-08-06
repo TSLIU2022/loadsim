@@ -18,11 +18,12 @@ import (
 )
 
 const (
-	visibleSystemCPUSourceSchedstat = "proc:schedstat"
-	linuxSchedstatPath              = "/proc/schedstat"
-	linuxSchedstatCPUFieldCount     = 10
-	linuxSchedstatMinimumVersion    = 10
-	linuxSchedstatMaximumVersion    = 17
+	visibleSystemCPUSourceSchedstat  = "proc:schedstat"
+	linuxSchedstatPath               = "/proc/schedstat"
+	linuxSchedstatCPUFieldCount      = 10
+	linuxSchedstatMinimumVersion     = 10
+	linuxSchedstatMaximumVersion     = 17
+	linuxSchedstatBusyOvershootRatio = 0.005
 )
 
 type linuxSchedstatSnapshot struct {
@@ -148,7 +149,7 @@ func sampleVisibleSystemCPUFrom(
 	if err != nil {
 		return VisibleSystemCPUSample{}, err
 	}
-	percent, err := calculateLinuxSchedstatCPUPercent(
+	busy, percent, err := normalizeLinuxSchedstatCPUUsage(
 		busy,
 		elapsed,
 		float64(len(start.cpuIDs)),
@@ -345,28 +346,62 @@ func calculateLinuxSchedstatCPUPercent(
 	elapsed time.Duration,
 	cpus float64,
 ) (float64, error) {
+	_, percent, err := normalizeLinuxSchedstatCPUUsage(busy, elapsed, cpus)
+	return percent, err
+}
+
+func normalizeLinuxSchedstatCPUUsage(
+	busy time.Duration,
+	elapsed time.Duration,
+	cpus float64,
+) (time.Duration, float64, error) {
 	if busy < 0 {
-		return 0, fmt.Errorf(
+		return 0, 0, fmt.Errorf(
 			"whole-machine CPU busy duration must not be negative",
 		)
 	}
 	if elapsed <= 0 {
-		return 0, fmt.Errorf(
+		return 0, 0, fmt.Errorf(
 			"whole-machine CPU sample interval must be greater than zero",
 		)
 	}
 	if !isFinite(cpus) || cpus <= 0 {
-		return 0, fmt.Errorf("whole-machine CPU capacity is invalid")
+		return 0, 0, fmt.Errorf("whole-machine CPU capacity is invalid")
 	}
-	denominator := elapsed.Seconds() * cpus
-	percent := busy.Seconds() / denominator * 100
-	if !isFinite(denominator) || denominator <= 0 ||
-		!isFinite(percent) || percent < 0 {
-		return 0, fmt.Errorf(
+
+	capacityNanoseconds := float64(elapsed) * cpus
+	if !isFinite(capacityNanoseconds) ||
+		capacityNanoseconds <= 0 ||
+		capacityNanoseconds >= float64(math.MaxInt64) {
+		return 0, 0, fmt.Errorf(
 			"whole-machine CPU utilization calculation is out of range",
 		)
 	}
-	return percent, nil
+
+	// Scheduler runtime and userspace monotonic time can differ slightly at
+	// saturation. Accept only a narrow skew, clamp it to physical capacity,
+	// and continue to fail closed for materially impossible counter deltas.
+	maximumBusyNanoseconds := capacityNanoseconds *
+		(1 + linuxSchedstatBusyOvershootRatio)
+	if float64(busy) > maximumBusyNanoseconds {
+		return 0, 0, fmt.Errorf(
+			"whole-machine CPU busy duration %s exceeds physical capacity %s beyond %.3f%% tolerance",
+			busy,
+			time.Duration(capacityNanoseconds),
+			linuxSchedstatBusyOvershootRatio*100,
+		)
+	}
+	if float64(busy) > capacityNanoseconds {
+		busy = time.Duration(capacityNanoseconds)
+	}
+
+	percent := float64(busy) / capacityNanoseconds * 100
+	if !isFinite(percent) || percent < 0 || percent > 100 {
+		return 0, 0, fmt.Errorf(
+			"whole-machine CPU utilization calculation is out of range",
+		)
+	}
+	return busy, percent, nil
 }
 
 func visibleSystemCPUReadDelayLimit(
