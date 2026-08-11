@@ -2,6 +2,17 @@
 
 这里记录 LoadSim 每个公开版本对使用者有影响的主要变化。完整发布正文、校验文件和二进制产物以 [GitHub Releases](https://github.com/fanderchan/loadsim/releases) 为准。
 
+## [v0.7.1] - 2026-08-11
+
+这次补丁更新修复部分 BCLinux 厂商内核延迟汇总 schedstat 运行时间时，整机 CPU 采样可能短时超过物理容量并导致 `fill` 退出的问题。
+
+### 主要变化
+
+- 整机 CPU 采样改为同时读取 `/proc/schedstat` 和 `/proc/stat`，每个窗口取更高的使用率：前者保留对 `SCHED_IDLE` worker 的准确记账，后者补足普通优先级业务满载时 schedstat 延迟刷新造成的短时少记。
+- schedstat 短时批量刷新导致的超容量值现在保守按 100% 饱和处理，让 LoadSim 优先退出 CPU 竞争，而不是因厂商内核的记账刷新节奏报错退出。
+- 状态与 `check` 的 CPU 来源更新为 `proc:schedstat+stat`；schedstat 版本、双源 CPU 集合、计数器单调性、读取耗时、采样时窗和控制边界校验仍然保留。
+- 修复候选在 BCLinux 8.2 与 BCLinux 21.10 各完成 CPU、CPU＋内存两个 5 分钟场景；业务争抢期间普通优先级负载获得 98.9%～99.5% 的整机 CPU 能力，未出现 LoadSim 错误、OOM 或内核异常。
+
 ## [v0.7.0] - 2026-08-11
 
 这次更新降低整机 CPU 调度计数器偶发慢读造成的误退出，并在首条状态日志中增加 cgroup CPU 运行环境诊断。
@@ -78,6 +89,8 @@
 - `v0.3.0-beta.1`：首次公开 beta，统一 `LoadSim` / `loadsim` 命名并完成三个核心命令。
 - `v0.3.0-beta.2`：增加官方 `linux/amd64` 产物的 CentOS 7 启动验证。
 
+[v0.7.1]: https://github.com/fanderchan/loadsim/releases/tag/v0.7.1
+[v0.7.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.7.0
 [v0.6.1]: https://github.com/fanderchan/loadsim/releases/tag/v0.6.1
 [v0.6.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.6.0
 [v0.5.0]: https://github.com/fanderchan/loadsim/releases/tag/v0.5.0

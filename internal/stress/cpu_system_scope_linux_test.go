@@ -5,6 +5,7 @@ package stress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"reflect"
@@ -106,21 +107,111 @@ func TestParseLinuxSchedstatRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestParseLinuxProcStat(t *testing.T) {
+	snapshot, err := parseLinuxProcStat([]byte(strings.Join([]string{
+		"cpu 100 20 30 400 50 10 5 2 80 9",
+		"cpu2 50 10 15 200 25 5 3 1 40 4",
+		"cpu0 50 10 15 200 25 5 2 1 40 5",
+		"intr 123",
+		"",
+	}, "\n")))
+	if err != nil {
+		t.Fatalf("parseLinuxProcStat: %v", err)
+	}
+	if !reflect.DeepEqual(snapshot.cpuIDs, []int{0, 2}) {
+		t.Fatalf("CPU IDs = %v want [0 2]", snapshot.cpuIDs)
+	}
+	if snapshot.total != 567 || snapshot.busy != 167 {
+		t.Fatalf(
+			"total/busy = %d/%d want 567/167; guest and iowait must be excluded",
+			snapshot.total,
+			snapshot.busy,
+		)
+	}
+}
+
+func TestParseLinuxProcStatRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{
+			name: "missing aggregate",
+			data: "cpu0 1 0 0 9\n",
+			want: "aggregate CPU line is missing",
+		},
+		{
+			name: "duplicate aggregate",
+			data: "cpu 1 0 0 9\ncpu 2 0 0 8\ncpu0 1 0 0 9\n",
+			want: "duplicate",
+		},
+		{
+			name: "missing per CPU",
+			data: "cpu 1 0 0 9\nintr 1\n",
+			want: "contains no per-CPU",
+		},
+		{
+			name: "invalid CPU label",
+			data: "cpu 1 0 0 9\ncpuX 1 0 0 9\n",
+			want: "invalid /proc/stat CPU label",
+		},
+		{
+			name: "short CPU line",
+			data: "cpu 1 0 0\ncpu0 1 0 0 9\n",
+			want: "want at least 5",
+		},
+		{
+			name: "invalid counter",
+			data: "cpu nope 0 0 9\ncpu0 1 0 0 9\n",
+			want: "CPU counter",
+		},
+		{
+			name: "duplicate CPU",
+			data: "cpu 1 0 0 9\ncpu0 1 0 0 9\ncpu0 1 0 0 9\n",
+			want: "duplicate /proc/stat CPU",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseLinuxProcStat([]byte(test.data))
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestParseLinuxSystemCPUSnapshotRejectsMismatchedCPUSet(t *testing.T) {
+	_, err := parseLinuxSystemCPUSnapshot(
+		[]byte("version 17\ncpu0 0 0 0 0 0 0 1 0 0\n"),
+		[]byte("cpu 1 0 0 9\ncpu0 1 0 0 9\ncpu1 0 0 0 10\n"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "CPU sets differ") {
+		t.Fatalf("error = %v want CPU set mismatch", err)
+	}
+}
+
 func TestInspectVisibleSystemCPUFromSchedstat(t *testing.T) {
 	first, err := inspectVisibleSystemCPUFrom([]byte(
 		"version 17\ncpu1 0 0 0 0 0 0 200 0 0\ncpu0 0 0 0 0 0 0 100 0 0\n",
+	), []byte(
+		"cpu 10 0 0 90 0 0 0 0 0 0\ncpu0 5 0 0 45 0 0 0 0 0 0\ncpu1 5 0 0 45 0 0 0 0 0 0\n",
 	))
 	if err != nil {
 		t.Fatalf("inspect first snapshot: %v", err)
 	}
 	second, err := inspectVisibleSystemCPUFrom([]byte(
 		"version 17\ncpu0 0 0 0 0 0 0 900 0 0\ncpu1 0 0 0 0 0 0 800 0 0\n",
+	), []byte(
+		"cpu 20 0 0 180 0 0 0 0 0 0\ncpu0 10 0 0 90 0 0 0 0 0 0\ncpu1 10 0 0 90 0 0 0 0 0 0\n",
 	))
 	if err != nil {
 		t.Fatalf("inspect second snapshot: %v", err)
 	}
-	if first.Source != visibleSystemCPUSourceSchedstat {
-		t.Fatalf("source = %q want %q", first.Source, visibleSystemCPUSourceSchedstat)
+	if first.Source != visibleSystemCPUSourceProcCounters {
+		t.Fatalf("source = %q want %q", first.Source, visibleSystemCPUSourceProcCounters)
 	}
 	if first.BoundaryKind != VisibleSystemCPUBoundaryHost {
 		t.Fatalf("boundary kind = %q want host", first.BoundaryKind)
@@ -140,6 +231,8 @@ func TestInspectVisibleSystemCPUFromSchedstat(t *testing.T) {
 
 	changed, err := inspectVisibleSystemCPUFrom([]byte(
 		"version 17\ncpu0 0 0 0 0 0 0 100 0 0\n",
+	), []byte(
+		"cpu 10 0 0 90 0 0 0 0 0 0\ncpu0 10 0 0 90 0 0 0 0 0 0\n",
 	))
 	if err != nil {
 		t.Fatalf("inspect changed snapshot: %v", err)
@@ -167,7 +260,7 @@ func TestSampleVisibleSystemCPUFromSchedstat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sampleVisibleSystemCPUFrom: %v", err)
 	}
-	if sample.Source != visibleSystemCPUSourceSchedstat ||
+	if sample.Source != visibleSystemCPUSourceProcCounters ||
 		sample.BoundaryKind != VisibleSystemCPUBoundaryHost ||
 		sample.CPUs != 2 {
 		t.Fatalf("unexpected sample metadata: %+v", sample)
@@ -177,6 +270,60 @@ func TestSampleVisibleSystemCPUFromSchedstat(t *testing.T) {
 	}
 	if math.Abs(sample.Percent-50) > 0.000001 {
 		t.Fatalf("percent = %.9f want 50", sample.Percent)
+	}
+}
+
+func TestSampleVisibleSystemCPUUsesProcStatAsConservativeFloor(t *testing.T) {
+	dependencies := systemCPUSampleDependencies(
+		t,
+		[]string{
+			"version 17\ncpu0 0 0 0 0 0 0 1000000000 0 0\ncpu1 0 0 0 0 0 0 2000000000 0 0\n",
+			"version 17\ncpu0 0 0 0 0 0 0 1200000000 0 0\ncpu1 0 0 0 0 0 0 2200000000 0 0\n",
+		},
+		[]string{
+			"cpu 0 0 0 100 0 0 0 0 0 0\ncpu0 0 0 0 50 0 0 0 0 0 0\ncpu1 0 0 0 50 0 0 0 0 0 0\n",
+			"cpu 200 0 0 100 0 0 0 0 0 0\ncpu0 100 0 0 50 0 0 0 0 0 0\ncpu1 100 0 0 50 0 0 0 0 0 0\n",
+		},
+		0,
+	)
+
+	sample, err := sampleVisibleSystemCPUFrom(
+		context.Background(),
+		time.Second,
+		dependencies,
+	)
+	if err != nil {
+		t.Fatalf("sampleVisibleSystemCPUFrom: %v", err)
+	}
+	if sample.Percent != 100 || sample.Busy != 2*time.Second {
+		t.Fatalf("sample = %+v want /proc/stat saturation floor", sample)
+	}
+}
+
+func TestSampleVisibleSystemCPUPreservesSchedstatIdleClassAccounting(t *testing.T) {
+	dependencies := systemCPUSampleDependencies(
+		t,
+		[]string{
+			"version 17\ncpu0 0 0 0 0 0 0 1000000000 0 0\ncpu1 0 0 0 0 0 0 2000000000 0 0\n",
+			"version 17\ncpu0 0 0 0 0 0 0 1400000000 0 0\ncpu1 0 0 0 0 0 0 2600000000 0 0\n",
+		},
+		[]string{
+			"cpu 0 0 0 100 0 0 0 0 0 0\ncpu0 0 0 0 50 0 0 0 0 0 0\ncpu1 0 0 0 50 0 0 0 0 0 0\n",
+			"cpu 30 0 0 270 0 0 0 0 0 0\ncpu0 15 0 0 135 0 0 0 0 0 0\ncpu1 15 0 0 135 0 0 0 0 0 0\n",
+		},
+		0,
+	)
+
+	sample, err := sampleVisibleSystemCPUFrom(
+		context.Background(),
+		time.Second,
+		dependencies,
+	)
+	if err != nil {
+		t.Fatalf("sampleVisibleSystemCPUFrom: %v", err)
+	}
+	if math.Abs(sample.Percent-50) > 0.000001 || sample.Busy != time.Second {
+		t.Fatalf("sample = %+v want schedstat 50%%", sample)
 	}
 }
 
@@ -206,7 +353,7 @@ func TestSampleVisibleSystemCPUClampsMinorSaturationOvershoot(t *testing.T) {
 	}
 }
 
-func TestSampleVisibleSystemCPURejectsMaterialSaturationOvershoot(t *testing.T) {
+func TestSampleVisibleSystemCPUConservativelyClampsMaterialSaturationOvershoot(t *testing.T) {
 	dependencies := schedstatSampleDependencies(
 		t,
 		[]string{
@@ -216,13 +363,16 @@ func TestSampleVisibleSystemCPURejectsMaterialSaturationOvershoot(t *testing.T) 
 		0,
 	)
 
-	_, err := sampleVisibleSystemCPUFrom(
+	sample, err := sampleVisibleSystemCPUFrom(
 		context.Background(),
 		time.Second,
 		dependencies,
 	)
-	if err == nil || !strings.Contains(err.Error(), "beyond 0.500% tolerance") {
-		t.Fatalf("error = %v want material saturation overshoot", err)
+	if err != nil {
+		t.Fatalf("sampleVisibleSystemCPUFrom: %v", err)
+	}
+	if sample.Percent != 100 || sample.Busy != time.Second {
+		t.Fatalf("sample = %+v want saturation", sample)
 	}
 }
 
@@ -352,15 +502,32 @@ func TestSampleVisibleSystemCPURetriesTransientSlowRead(t *testing.T) {
 		"version 17\ncpu0 0 0 0 0 0 0 100 0 0\n",
 		"version 17\ncpu0 0 0 0 0 0 0 100000100 0 0\n",
 	}
+	lastSchedstat := ""
+	procReadCount := 0
 	dependencies := linuxVisibleCPUSampleDependencies{
 		readFile: func(path string) ([]byte, error) {
-			if readIndex >= len(readings) {
-				t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+			switch path {
+			case linuxSchedstatPath:
+				if readIndex >= len(readings) {
+					t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+				}
+				lastSchedstat = readings[readIndex]
+				data := []byte(lastSchedstat)
+				current = current.Add(readAdvances[readIndex])
+				readIndex++
+				return data, nil
+			case linuxProcStatPath:
+				procReadCount++
+				return testProcStatForSchedstat(
+					t,
+					lastSchedstat,
+					uint64(procReadCount*100),
+					0,
+				), nil
+			default:
+				t.Fatalf("unexpected read path %q", path)
+				return nil, nil
 			}
-			data := []byte(readings[readIndex])
-			current = current.Add(readAdvances[readIndex])
-			readIndex++
-			return data, nil
 		},
 		now: func() time.Time {
 			return current
@@ -399,15 +566,32 @@ func TestSampleVisibleSystemCPURetriesTransientSlowEndRead(t *testing.T) {
 		"version 17\ncpu0 0 0 0 0 0 0 100000100 0 0\n",
 		"version 17\ncpu0 0 0 0 0 0 0 120000100 0 0\n",
 	}
+	lastSchedstat := ""
+	procReadCount := 0
 	dependencies := linuxVisibleCPUSampleDependencies{
 		readFile: func(path string) ([]byte, error) {
-			if readIndex >= len(readings) {
-				t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+			switch path {
+			case linuxSchedstatPath:
+				if readIndex >= len(readings) {
+					t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+				}
+				lastSchedstat = readings[readIndex]
+				data := []byte(lastSchedstat)
+				current = current.Add(readAdvances[readIndex])
+				readIndex++
+				return data, nil
+			case linuxProcStatPath:
+				procReadCount++
+				return testProcStatForSchedstat(
+					t,
+					lastSchedstat,
+					uint64(procReadCount*100),
+					0,
+				), nil
+			default:
+				t.Fatalf("unexpected read path %q", path)
+				return nil, nil
 			}
-			data := []byte(readings[readIndex])
-			current = current.Add(readAdvances[readIndex])
-			readIndex++
-			return data, nil
 		},
 		now: func() time.Time { return current },
 		wait: func(_ context.Context, duration time.Duration) error {
@@ -434,11 +618,28 @@ func TestSampleVisibleSystemCPURetriesTransientSlowEndRead(t *testing.T) {
 func TestSampleVisibleSystemCPURejectsRepeatedSlowReads(t *testing.T) {
 	current := time.Unix(100, 0)
 	readCount := 0
+	lastSchedstat := ""
+	procReadCount := 0
 	dependencies := linuxVisibleCPUSampleDependencies{
 		readFile: func(path string) ([]byte, error) {
-			readCount++
-			current = current.Add(20 * time.Millisecond)
-			return []byte("version 17\ncpu0 0 0 0 0 0 0 100 0 0\n"), nil
+			switch path {
+			case linuxSchedstatPath:
+				readCount++
+				current = current.Add(20 * time.Millisecond)
+				lastSchedstat = "version 17\ncpu0 0 0 0 0 0 0 100 0 0\n"
+				return []byte(lastSchedstat), nil
+			case linuxProcStatPath:
+				procReadCount++
+				return testProcStatForSchedstat(
+					t,
+					lastSchedstat,
+					uint64(procReadCount*100),
+					0,
+				), nil
+			default:
+				t.Fatalf("unexpected read path %q", path)
+				return nil, nil
+			}
 		},
 		now:  func() time.Time { return current },
 		wait: func(context.Context, time.Duration) error { return nil },
@@ -453,11 +654,11 @@ func TestSampleVisibleSystemCPURejectsRepeatedSlowReads(t *testing.T) {
 		!strings.Contains(err.Error(), "after 3 consecutive attempts") {
 		t.Fatalf("error = %v want repeated slow read rejection", err)
 	}
-	if readCount != linuxSchedstatReadMaxAttempts {
+	if readCount != linuxCPUCounterReadMaxAttempts {
 		t.Fatalf(
 			"scheduler statistics reads = %d want %d",
 			readCount,
-			linuxSchedstatReadMaxAttempts,
+			linuxCPUCounterReadMaxAttempts,
 		)
 	}
 }
@@ -527,6 +728,75 @@ func TestLinuxSchedstatBusyDeltaValidation(t *testing.T) {
 	}
 }
 
+func TestCalculateLinuxProcStatCPUPercent(t *testing.T) {
+	tests := []struct {
+		name  string
+		start linuxProcStatSnapshot
+		end   linuxProcStatSnapshot
+		want  float64
+	}{
+		{
+			name:  "half busy",
+			start: linuxProcStatSnapshot{total: 100, busy: 20},
+			end:   linuxProcStatSnapshot{total: 300, busy: 120},
+			want:  50,
+		},
+		{
+			name:  "no elapsed ticks",
+			start: linuxProcStatSnapshot{total: 100, busy: 20},
+			end:   linuxProcStatSnapshot{total: 100, busy: 20},
+			want:  0,
+		},
+		{
+			name:  "counter skew is saturation",
+			start: linuxProcStatSnapshot{total: 100, busy: 20},
+			end:   linuxProcStatSnapshot{total: 150, busy: 100},
+			want:  100,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := calculateLinuxProcStatCPUPercent(test.start, test.end)
+			if err != nil {
+				t.Fatalf("calculateLinuxProcStatCPUPercent: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("percent = %.1f want %.1f", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCalculateLinuxProcStatCPUPercentRejectsCounterRegression(t *testing.T) {
+	tests := []struct {
+		name  string
+		start linuxProcStatSnapshot
+		end   linuxProcStatSnapshot
+		want  string
+	}{
+		{
+			name:  "total",
+			start: linuxProcStatSnapshot{total: 100, busy: 20},
+			end:   linuxProcStatSnapshot{total: 99, busy: 21},
+			want:  "total CPU counter moved backwards",
+		},
+		{
+			name:  "busy",
+			start: linuxProcStatSnapshot{total: 100, busy: 20},
+			end:   linuxProcStatSnapshot{total: 101, busy: 19},
+			want:  "busy CPU counter moved backwards",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := calculateLinuxProcStatCPUPercent(test.start, test.end)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestCalculateLinuxSchedstatCPUPercentValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -553,6 +823,17 @@ func TestCalculateLinuxSchedstatCPUPercentValidation(t *testing.T) {
 	}
 }
 
+func TestCalculateLinuxSchedstatCPUPercentRejectsMaterialOvershoot(t *testing.T) {
+	_, err := calculateLinuxSchedstatCPUPercent(
+		101*time.Millisecond,
+		100*time.Millisecond,
+		1,
+	)
+	if err == nil || !strings.Contains(err.Error(), "beyond 0.500% tolerance") {
+		t.Fatalf("error = %v want material saturation overshoot", err)
+	}
+}
+
 func schedstatSampleDependencies(
 	t *testing.T,
 	readings []string,
@@ -561,18 +842,31 @@ func schedstatSampleDependencies(
 	t.Helper()
 	current := time.Unix(100, 0)
 	readIndex := 0
+	lastSchedstat := ""
+	procReadCount := 0
 	return linuxVisibleCPUSampleDependencies{
 		readFile: func(path string) ([]byte, error) {
-			if path != linuxSchedstatPath {
-				t.Fatalf("read path = %q want %q", path, linuxSchedstatPath)
+			switch path {
+			case linuxSchedstatPath:
+				if readIndex >= len(readings) {
+					t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+				}
+				lastSchedstat = readings[readIndex]
+				readIndex++
+				current = current.Add(readAdvance)
+				return []byte(lastSchedstat), nil
+			case linuxProcStatPath:
+				procReadCount++
+				return testProcStatForSchedstat(
+					t,
+					lastSchedstat,
+					uint64(procReadCount*100),
+					0,
+				), nil
+			default:
+				t.Fatalf("unexpected read path %q", path)
+				return nil, nil
 			}
-			if readIndex >= len(readings) {
-				t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
-			}
-			data := []byte(readings[readIndex])
-			readIndex++
-			current = current.Add(readAdvance)
-			return data, nil
 		},
 		now: func() time.Time {
 			return current
@@ -585,4 +879,78 @@ func schedstatSampleDependencies(
 			return nil
 		},
 	}
+}
+
+func systemCPUSampleDependencies(
+	t *testing.T,
+	schedstatReadings []string,
+	procStatReadings []string,
+	readAdvance time.Duration,
+) linuxVisibleCPUSampleDependencies {
+	t.Helper()
+	current := time.Unix(100, 0)
+	schedstatIndex := 0
+	procStatIndex := 0
+	return linuxVisibleCPUSampleDependencies{
+		readFile: func(path string) ([]byte, error) {
+			switch path {
+			case linuxSchedstatPath:
+				if schedstatIndex >= len(schedstatReadings) {
+					t.Fatalf(
+						"unexpected scheduler statistics read %d",
+						schedstatIndex+1,
+					)
+				}
+				data := []byte(schedstatReadings[schedstatIndex])
+				schedstatIndex++
+				current = current.Add(readAdvance)
+				return data, nil
+			case linuxProcStatPath:
+				if procStatIndex >= len(procStatReadings) {
+					t.Fatalf(
+						"unexpected /proc/stat read %d",
+						procStatIndex+1,
+					)
+				}
+				data := []byte(procStatReadings[procStatIndex])
+				procStatIndex++
+				return data, nil
+			default:
+				t.Fatalf("unexpected read path %q", path)
+				return nil, nil
+			}
+		},
+		now: func() time.Time {
+			return current
+		},
+		wait: func(ctx context.Context, duration time.Duration) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current = current.Add(duration)
+			return nil
+		},
+	}
+}
+
+func testProcStatForSchedstat(
+	t *testing.T,
+	schedstat string,
+	total uint64,
+	busy uint64,
+) []byte {
+	t.Helper()
+	if busy > total {
+		t.Fatalf("test /proc/stat busy %d exceeds total %d", busy, total)
+	}
+	snapshot, err := parseLinuxSchedstat([]byte(schedstat))
+	if err != nil {
+		t.Fatalf("parse test schedstat: %v", err)
+	}
+	var output strings.Builder
+	_, _ = fmt.Fprintf(&output, "cpu %d 0 0 %d 0 0 0 0 0 0\n", busy, total-busy)
+	for _, cpuID := range snapshot.cpuIDs {
+		_, _ = fmt.Fprintf(&output, "cpu%d 0 0 0 0 0 0 0 0 0 0\n", cpuID)
+	}
+	return []byte(output.String())
 }

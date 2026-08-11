@@ -279,12 +279,14 @@ loadsim stress \
 ## 物理机与虚拟机
 
 - CPU `fill` 只支持直接运行在物理机或普通虚拟机的宿主机操作系统中，控制口径始终是整机。
-- CPU 采样不区分 cgroup v1 和 v2，也不依赖 CPU cgroup 文件；应以 `check` 输出的 `proc:schedstat` 和 `host` 边界为准。
+- CPU 采样不区分 cgroup v1 和 v2，也不依赖 CPU cgroup 文件；应以 `check` 输出的 `proc:schedstat+stat` 和 `host` 边界为准。
 - 不要在容器中运行 CPU `fill`。容器内的 `/proc/schedstat` 可能反映宿主机，而 worker 能使用的资源却受容器约束，两者不构成可靠的同一控制边界。
 - 逻辑 CPU 集合、schedstat 版本或计数器、进程 affinity、`GOMAXPROCS` 发生变化时，CPU 控制器失败关闭，确认新环境后再重启。
 - 内存保护仍会读取宿主机和可见的有限 cgroup 约束，避免忽略 systemd `MemoryMax` 等实际内存上限；这不参与 CPU 使用率采样。
 
-状态中的 `cpu_source=proc:schedstat`、`cpu_boundary=host:...` 和 `cpu_scope_cpus` 表示整机 CPU 控制口径；`memory_scope` 与 `memory_guard_scope` 独立表示内存边界。
+整机 CPU 采样同时读取 `/proc/schedstat` 和 `/proc/stat`，每个采样窗口取两者中更高的使用率。`schedstat` 用于正确识别 `SCHED_IDLE` worker 的运行时间，`stat` 用于补偿部分厂商内核延迟汇总 schedstat 运行时间造成的短时少记；任一来源显示业务繁忙时，LoadSim 都会保守让步。schedstat 短时批量刷新造成的超容量值按 100% 饱和处理，版本、CPU 集合、计数器单调性、读取耗时和采样时窗等完整性校验仍然保留。
+
+状态中的 `cpu_source=proc:schedstat+stat`、`cpu_boundary=host:...` 和 `cpu_scope_cpus` 表示整机 CPU 控制口径；`memory_scope` 与 `memory_guard_scope` 独立表示内存边界。
 
 ## 使用 systemd 托管
 
@@ -333,7 +335,7 @@ journalctl -u loadsim -f
 状态行使用 `key=value`，例如：
 
 ```text
-[12:00:00] mode=fill cpu_band=30.0:50.0% cpu_scope=system cpu_scheduler=idle cpu_drive=18.0% cpu_workers=2/4 cpu_scope_cpus=4.00 cpu_source=proc:schedstat cpu_boundary=host:schedcpu-... cpu_observed=39.4% cpu_cgroup=v2 cpu_cgroup_probe=ok cpu_cgroup_quota=2.00CPU cpu_cgroup_quota_level=ancestor cpu_cgroup_weight_min=1 cpu_cgroup_weight_level=ancestor cpu_cgroup_periods=20 cpu_cgroup_throttled_periods=7 cpu_cgroup_throttled_time=125ms cpu_cgroup_throttling_level=ancestor memory_scope=host memory_total=38.2% process_rss=9MiB
+[12:00:00] mode=fill cpu_band=30.0:50.0% cpu_scope=system cpu_scheduler=idle cpu_drive=18.0% cpu_workers=2/4 cpu_scope_cpus=4.00 cpu_source=proc:schedstat+stat cpu_boundary=host:schedcpu-... cpu_observed=39.4% cpu_cgroup=v2 cpu_cgroup_probe=ok cpu_cgroup_quota=2.00CPU cpu_cgroup_quota_level=ancestor cpu_cgroup_weight_min=1 cpu_cgroup_weight_level=ancestor cpu_cgroup_periods=20 cpu_cgroup_throttled_periods=7 cpu_cgroup_throttled_time=125ms cpu_cgroup_throttling_level=ancestor memory_scope=host memory_total=38.2% process_rss=9MiB
 ```
 
 cgroup CPU 诊断字段只出现在启动后的首条 CPU 状态行，不输出 cgroup 路径：
