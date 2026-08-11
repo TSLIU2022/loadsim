@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -24,12 +25,26 @@ const (
 	linuxSchedstatMinimumVersion     = 10
 	linuxSchedstatMaximumVersion     = 17
 	linuxSchedstatBusyOvershootRatio = 0.005
+	linuxSchedstatReadMaxAttempts    = 3
 )
 
 type linuxSchedstatSnapshot struct {
 	version  uint64
 	cpuIDs   []int
 	runtimes map[int]uint64
+}
+
+type linuxSchedstatReadDelayError struct {
+	delay time.Duration
+	limit time.Duration
+}
+
+func (e *linuxSchedstatReadDelayError) Error() string {
+	return fmt.Sprintf(
+		"whole-machine CPU scheduler counter read took %s, exceeding the safe limit %s",
+		e.delay,
+		e.limit,
+	)
 }
 
 type linuxVisibleCPUSampleDependencies struct {
@@ -99,7 +114,8 @@ func sampleVisibleSystemCPUFrom(
 	}
 
 	readDelayLimit := visibleSystemCPUReadDelayLimit(sampleDuration)
-	start, startedAt, err := readLinuxSchedstatAtMidpoint(
+	start, startedAt, err := readLinuxSchedstatAtMidpointWithRetry(
+		ctx,
 		dependencies,
 		readDelayLimit,
 	)
@@ -115,7 +131,8 @@ func sampleVisibleSystemCPUFrom(
 	if err := ctx.Err(); err != nil {
 		return VisibleSystemCPUSample{}, err
 	}
-	end, finishedAt, err := readLinuxSchedstatAtMidpoint(
+	end, finishedAt, err := readLinuxSchedstatAtMidpointWithRetry(
+		ctx,
 		dependencies,
 		readDelayLimit,
 	)
@@ -441,17 +458,44 @@ func readLinuxSchedstatAtMidpoint(
 		)
 	}
 	if delay > delayLimit {
-		return linuxSchedstatSnapshot{}, time.Time{}, fmt.Errorf(
-			"whole-machine CPU scheduler counter read took %s, exceeding the safe limit %s",
-			delay,
-			delayLimit,
-		)
+		return linuxSchedstatSnapshot{}, time.Time{}, &linuxSchedstatReadDelayError{
+			delay: delay,
+			limit: delayLimit,
+		}
 	}
 	snapshot, err := parseLinuxSchedstat(data)
 	if err != nil {
 		return linuxSchedstatSnapshot{}, time.Time{}, err
 	}
 	return snapshot, before.Add(delay / 2), nil
+}
+
+func readLinuxSchedstatAtMidpointWithRetry(
+	ctx context.Context,
+	dependencies linuxVisibleCPUSampleDependencies,
+	delayLimit time.Duration,
+) (linuxSchedstatSnapshot, time.Time, error) {
+	var lastDelayErr *linuxSchedstatReadDelayError
+	for attempt := 1; attempt <= linuxSchedstatReadMaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return linuxSchedstatSnapshot{}, time.Time{}, err
+		}
+		snapshot, observedAt, err := readLinuxSchedstatAtMidpoint(
+			dependencies,
+			delayLimit,
+		)
+		if err == nil {
+			return snapshot, observedAt, nil
+		}
+		if !errors.As(err, &lastDelayErr) {
+			return linuxSchedstatSnapshot{}, time.Time{}, err
+		}
+	}
+	return linuxSchedstatSnapshot{}, time.Time{}, fmt.Errorf(
+		"%w (after %d consecutive attempts)",
+		lastDelayErr,
+		linuxSchedstatReadMaxAttempts,
+	)
 }
 
 func waitVisibleSystemCPUSample(

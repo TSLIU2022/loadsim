@@ -419,13 +419,28 @@ func runFill(command *cobra.Command, options fillOptions) error {
 		}
 	}
 
+	var initialCPUFields []string
+	if cpuStressor != nil {
+		cpuCgroupInfo, cpuCgroupErr := system.InspectCPUCgroup()
+		initialCPUFields = formatCPUCgroupStatusFields(
+			cpuCgroupInfo,
+			cpuCgroupErr,
+		)
+	}
+	firstStatus := true
 	printStatus := func() {
+		var diagnosticFields []string
+		if firstStatus {
+			diagnosticFields = initialCPUFields
+			firstStatus = false
+		}
 		printFillStatus(
 			cpuStressor,
 			ramStressor,
 			guard,
 			memoryController,
 			options.oomScoreAdj,
+			diagnosticFields,
 		)
 	}
 	reason, runErr := watchLoop(
@@ -462,6 +477,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 					guard,
 					memoryController,
 					options.oomScoreAdj,
+					nil,
 				)
 			},
 			ramStressorErrors(ramStressor),
@@ -521,6 +537,7 @@ func printFillStatus(
 	guard *memoryGuard,
 	controller *adaptiveMemoryController,
 	oomScoreAdj int,
+	diagnosticFields []string,
 ) {
 	fields := []string{"mode=fill"}
 	if cpuStressor != nil {
@@ -562,6 +579,7 @@ func printFillStatus(
 				fmt.Sprintf("cpu_observed=%.1f%%", status.LastScopePercent),
 			)
 		}
+		fields = append(fields, diagnosticFields...)
 	}
 
 	if ramStressor != nil && controller != nil {
@@ -624,4 +642,61 @@ func printFillStatus(
 		time.Now().Format("15:04:05"),
 		strings.Join(fields, " "),
 	)
+}
+
+func formatCPUCgroupStatusFields(
+	info system.CPUCgroupInfo,
+	probeErr error,
+) []string {
+	if probeErr != nil {
+		return []string{
+			"cpu_cgroup=unknown",
+			"cpu_cgroup_probe=failed",
+		}
+	}
+	fields := []string{
+		"cpu_cgroup=" + info.Version,
+		"cpu_cgroup_probe=ok",
+	}
+	switch {
+	case !info.QuotaKnown:
+		fields = append(fields, "cpu_cgroup_quota=unknown")
+	case !info.QuotaLimited:
+		fields = append(fields, "cpu_cgroup_quota=unlimited")
+	default:
+		fields = append(
+			fields,
+			fmt.Sprintf("cpu_cgroup_quota=%.2fCPU", info.QuotaCPUs),
+			"cpu_cgroup_quota_level="+info.QuotaLevel,
+		)
+	}
+	if info.WeightKnown {
+		fieldPrefix := "cpu_cgroup_" + info.WeightKind
+		fields = append(
+			fields,
+			fmt.Sprintf(
+				"%s_min=%d",
+				fieldPrefix,
+				info.Weight,
+			),
+			fieldPrefix+"_level="+info.WeightLevel,
+		)
+	} else {
+		fields = append(fields, "cpu_cgroup_weight_min=unknown")
+	}
+	if info.ThrottlingKnown {
+		fields = append(
+			fields,
+			fmt.Sprintf("cpu_cgroup_periods=%d", info.Periods),
+			fmt.Sprintf(
+				"cpu_cgroup_throttled_periods=%d",
+				info.ThrottledPeriods,
+			),
+			"cpu_cgroup_throttled_time="+info.ThrottledTime.String(),
+			"cpu_cgroup_throttling_level="+info.ThrottlingLevel,
+		)
+	} else {
+		fields = append(fields, "cpu_cgroup_throttling=unknown")
+	}
+	return fields
 }

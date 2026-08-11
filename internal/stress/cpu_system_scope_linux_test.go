@@ -339,19 +339,108 @@ func TestSampleVisibleSystemCPUCancellation(t *testing.T) {
 	}
 }
 
-func TestSampleVisibleSystemCPURejectsSlowRead(t *testing.T) {
-	base := time.Unix(100, 0)
-	nowValues := []time.Time{base, base.Add(20 * time.Millisecond)}
-	nowIndex := 0
+func TestSampleVisibleSystemCPURetriesTransientSlowRead(t *testing.T) {
+	current := time.Unix(100, 0)
+	readIndex := 0
+	readAdvances := []time.Duration{
+		20 * time.Millisecond,
+		0,
+		0,
+	}
+	readings := []string{
+		"version 17\ncpu0 0 0 0 0 0 0 50 0 0\n",
+		"version 17\ncpu0 0 0 0 0 0 0 100 0 0\n",
+		"version 17\ncpu0 0 0 0 0 0 0 100000100 0 0\n",
+	}
 	dependencies := linuxVisibleCPUSampleDependencies{
 		readFile: func(path string) ([]byte, error) {
-			return []byte("version 17\ncpu0 0 0 0 0 0 0 100 0 0\n"), nil
+			if readIndex >= len(readings) {
+				t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+			}
+			data := []byte(readings[readIndex])
+			current = current.Add(readAdvances[readIndex])
+			readIndex++
+			return data, nil
 		},
 		now: func() time.Time {
-			value := nowValues[nowIndex]
-			nowIndex++
-			return value
+			return current
 		},
+		wait: func(_ context.Context, duration time.Duration) error {
+			current = current.Add(duration)
+			return nil
+		},
+	}
+	sample, err := sampleVisibleSystemCPUFrom(
+		context.Background(),
+		100*time.Millisecond,
+		dependencies,
+	)
+	if err != nil {
+		t.Fatalf("sample after transient slow read: %v", err)
+	}
+	if readIndex != 3 {
+		t.Fatalf("scheduler statistics reads = %d want 3", readIndex)
+	}
+	if sample.Elapsed != 100*time.Millisecond || sample.Percent != 100 {
+		t.Fatalf("sample = %+v want 100ms at 100%%", sample)
+	}
+}
+
+func TestSampleVisibleSystemCPURetriesTransientSlowEndRead(t *testing.T) {
+	current := time.Unix(100, 0)
+	readIndex := 0
+	readAdvances := []time.Duration{
+		0,
+		20 * time.Millisecond,
+		0,
+	}
+	readings := []string{
+		"version 17\ncpu0 0 0 0 0 0 0 100 0 0\n",
+		"version 17\ncpu0 0 0 0 0 0 0 100000100 0 0\n",
+		"version 17\ncpu0 0 0 0 0 0 0 120000100 0 0\n",
+	}
+	dependencies := linuxVisibleCPUSampleDependencies{
+		readFile: func(path string) ([]byte, error) {
+			if readIndex >= len(readings) {
+				t.Fatalf("unexpected scheduler statistics read %d", readIndex+1)
+			}
+			data := []byte(readings[readIndex])
+			current = current.Add(readAdvances[readIndex])
+			readIndex++
+			return data, nil
+		},
+		now: func() time.Time { return current },
+		wait: func(_ context.Context, duration time.Duration) error {
+			current = current.Add(duration)
+			return nil
+		},
+	}
+	sample, err := sampleVisibleSystemCPUFrom(
+		context.Background(),
+		100*time.Millisecond,
+		dependencies,
+	)
+	if err != nil {
+		t.Fatalf("sample after transient slow end read: %v", err)
+	}
+	if readIndex != 3 {
+		t.Fatalf("scheduler statistics reads = %d want 3", readIndex)
+	}
+	if sample.Elapsed != 120*time.Millisecond || sample.Percent != 100 {
+		t.Fatalf("sample = %+v want 120ms at 100%%", sample)
+	}
+}
+
+func TestSampleVisibleSystemCPURejectsRepeatedSlowReads(t *testing.T) {
+	current := time.Unix(100, 0)
+	readCount := 0
+	dependencies := linuxVisibleCPUSampleDependencies{
+		readFile: func(path string) ([]byte, error) {
+			readCount++
+			current = current.Add(20 * time.Millisecond)
+			return []byte("version 17\ncpu0 0 0 0 0 0 0 100 0 0\n"), nil
+		},
+		now:  func() time.Time { return current },
 		wait: func(context.Context, time.Duration) error { return nil },
 	}
 	_, err := sampleVisibleSystemCPUFrom(
@@ -359,8 +448,17 @@ func TestSampleVisibleSystemCPURejectsSlowRead(t *testing.T) {
 		100*time.Millisecond,
 		dependencies,
 	)
-	if err == nil || !strings.Contains(err.Error(), "exceeding the safe limit") {
-		t.Fatalf("error = %v want slow read rejection", err)
+	if err == nil ||
+		!strings.Contains(err.Error(), "exceeding the safe limit") ||
+		!strings.Contains(err.Error(), "after 3 consecutive attempts") {
+		t.Fatalf("error = %v want repeated slow read rejection", err)
+	}
+	if readCount != linuxSchedstatReadMaxAttempts {
+		t.Fatalf(
+			"scheduler statistics reads = %d want %d",
+			readCount,
+			linuxSchedstatReadMaxAttempts,
+		)
 	}
 }
 

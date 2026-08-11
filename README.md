@@ -97,9 +97,9 @@ loadsim fill \
 - 高于 50% 时逐步降低驱动力。
 - `--duration-sec 0` 表示持续运行；默认值为 60 秒，防止误操作后无限造压。
 
-`fill` 固定使用整机 `system` 口径：从 `/proc/schedstat` 读取每个逻辑 CPU 的任务运行时间并汇总，不读取 CPU cgroup，也不使用在部分虚拟化内核中可能少记低优先级 CPU 时间的 `/proc/stat`。启动和运行期间会校验 schedstat 版本、逻辑 CPU 集合、计数器单调性和读取耗时；满载时最多容忍 0.5% 的跨时钟计时偏差并钳制到物理容量，超过该边界或无法证明采样连续可靠时仍然失败关闭。
+`fill` 固定使用整机 `system` 口径：从 `/proc/schedstat` 读取每个逻辑 CPU 的任务运行时间并汇总，CPU 使用率不从 cgroup 计算，也不使用在部分虚拟化内核中可能少记低优先级 CPU 时间的 `/proc/stat`。启动和运行期间会校验 schedstat 版本、逻辑 CPU 集合、计数器单调性和读取耗时；单次慢读会被丢弃并立即重试，连续三次仍超过读取耗时上限才失败关闭。满载时最多容忍 0.5% 的跨时钟计时偏差并钳制到物理容量，超过该边界或无法证明采样连续可靠时仍然失败关闭。
 
-LoadSim 自身能使用的 worker 数量只取进程 CPU affinity 与 `GOMAXPROCS` 的较小值，并在运行期间重新检查。CPU 路径不解析 cgroup v1/v2 的用量、quota 或 cpuset 文件。
+LoadSim 自身能使用的 worker 数量只取进程 CPU affinity 与 `GOMAXPROCS` 的较小值，并在运行期间重新检查。CPU 控制仍不把 cgroup v1/v2 用量、quota 或 cpuset 当作整机采样口径；但为了排查调度延迟，`fill` 会在首条 CPU 状态行中记录只读的 cgroup CPU 诊断结果。
 
 CPU worker 默认使用 Linux `SCHED_IDLE`。普通业务即使也是 `nice=19`，仍然比 `SCHED_IDLE` worker 优先。每个 worker 都会在独立 OS 线程上设置并读回调度策略；内核、容器安全策略或权限不支持时，命令失败关闭。
 
@@ -333,8 +333,15 @@ journalctl -u loadsim -f
 状态行使用 `key=value`，例如：
 
 ```text
-[12:00:00] mode=fill cpu_band=30.0:50.0% cpu_scope=system cpu_scheduler=idle cpu_drive=18.0% cpu_workers=2/4 cpu_scope_cpus=4.00 cpu_source=proc:schedstat cpu_boundary=host:schedcpu-... cpu_observed=39.4% memory_scope=host memory_total=38.2% process_rss=9MiB
+[12:00:00] mode=fill cpu_band=30.0:50.0% cpu_scope=system cpu_scheduler=idle cpu_drive=18.0% cpu_workers=2/4 cpu_scope_cpus=4.00 cpu_source=proc:schedstat cpu_boundary=host:schedcpu-... cpu_observed=39.4% cpu_cgroup=v2 cpu_cgroup_probe=ok cpu_cgroup_quota=2.00CPU cpu_cgroup_quota_level=ancestor cpu_cgroup_weight_min=1 cpu_cgroup_weight_level=ancestor cpu_cgroup_periods=20 cpu_cgroup_throttled_periods=7 cpu_cgroup_throttled_time=125ms cpu_cgroup_throttling_level=ancestor memory_scope=host memory_total=38.2% process_rss=9MiB
 ```
+
+cgroup CPU 诊断字段只出现在启动后的首条 CPU 状态行，不输出 cgroup 路径：
+
+- `cpu_cgroup=v1|v2|none` 表示进程所在的 cgroup CPU 层级。`cpu_cgroup_probe=failed` 只表示诊断不可用，不会中止压测。
+- `cpu_cgroup_quota` 是当前层到可见祖先层中最紧的硬配额；`2.00CPU` 表示最多约等于 2 个核，`unlimited` 表示没发现可见的硬配额。
+- cgroup v2 的 `cpu_cgroup_weight_min` 和 v1 的 `cpu_cgroup_shares_min` 是可见层级中的最低相对权重。v2 默认值是 100，v1 默认值是 1024；数值很低只会在有 CPU 竞争时明显影响调度。
+- `*_level=self|ancestor` 表示该值来自进程当前层还是祖先层。`cpu_cgroup_periods` 是总周期数，`cpu_cgroup_throttled_*` 是其中被限流的累计周期数和时长；祖先层数据可能包含同层其他进程或过往负载，因此大于 0 是排查线索，不能单独证明本次 LoadSim 已被限流。
 
 正常达到时长或收到 `SIGINT` / `SIGTERM` 后返回成功。控制器错误、记账矛盾、边界变化、安全探测失败或紧急水位触发时返回非零。状态输出为英文是为了保持脚本字段稳定；仓库文档和发布说明使用中文。
 
