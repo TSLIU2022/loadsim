@@ -48,10 +48,18 @@ const (
 	IdleModeTrim CPUIdleMode = "trim"
 )
 
+type YieldPolicy string
+
+const (
+	YieldPolicyGradual YieldPolicy = "gradual"
+	YieldPolicyZero    YieldPolicy = "zero"
+)
+
 type CPUConfig struct {
 	Mode            Mode
 	Scope           CPUScope
 	IdleMode        CPUIdleMode
+	YieldPolicy     YieldPolicy
 	Percent         float64
 	MinPercent      float64
 	MaxPercent      float64
@@ -69,6 +77,7 @@ type CPUConfig struct {
 type CPUStatus struct {
 	Mode                        Mode
 	Scope                       CPUScope
+	YieldPolicy                 YieldPolicy
 	IdleMode                    CPUIdleMode
 	WorkerScheduler             CPUWorkerScheduler
 	WorkerNice                  int
@@ -264,6 +273,14 @@ func newCPUStressorWithSystemAccounting(
 	}
 	if config.IdleMode != IdleModePark && config.IdleMode != IdleModeTrim {
 		return nil, fmt.Errorf("CPU idle mode must be park or trim")
+	}
+
+	if config.YieldPolicy == "" {
+		config.YieldPolicy = YieldPolicyGradual
+	}
+	if config.YieldPolicy != YieldPolicyGradual &&
+		config.YieldPolicy != YieldPolicyZero {
+		return nil, fmt.Errorf("CPU yield policy must be gradual or zero")
 	}
 
 	switch config.Mode {
@@ -497,6 +514,7 @@ func (s *CPUStressor) Status() CPUStatus {
 		Scope:                   s.config.Scope,
 		IdleMode:                s.config.IdleMode,
 		WorkerScheduler:         s.workerScheduler,
+		YieldPolicy:             s.config.YieldPolicy,
 		WorkerNice:              s.workerNice,
 		ActiveWorkers:           activeWorkerCount(s.appliedPercent, s.config.Cores),
 		MaxWorkers:              s.config.Cores,
@@ -688,6 +706,10 @@ func (s *CPUStressor) controlTick() bool {
 		s.config.DeadbandPercent,
 		s.config.MaxStepPercent,
 	)
+	if s.config.YieldPolicy == YieldPolicyZero &&
+		hostUsage > requested+s.config.DeadbandPercent {
+		nextAppliedPercent = 0
+	}
 	err = s.applyTargetLocked(nextAppliedPercent)
 	s.lock.Unlock()
 	if err != nil {

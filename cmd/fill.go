@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fanderchan/loadsim/internal/stress"
@@ -14,7 +15,7 @@ import (
 type fillOptions struct {
 	cpuBand                string
 	memoryBand             string
-	memoryMaxMiB           int
+	memoryMaxMiB           string
 	memoryMaxGiB           int
 	cpuCores               int
 	cpuControlMS           int
@@ -22,6 +23,7 @@ type fillOptions struct {
 	cpuMaxStep             float64
 	cpuScheduler           string
 	cpuNice                string
+	yieldPolicy            string
 	memoryControlMS        int
 	memoryGrowMiBPerSec    int
 	memoryReleaseMiBPerSec int
@@ -60,11 +62,11 @@ func newFillCommand(options *fillOptions) *cobra.Command {
 		"",
 		"total memory utilization band as LOW:HIGH percent",
 	)
-	flags.IntVar(
+	flags.StringVar(
 		&options.memoryMaxMiB,
 		"memory-max-mib",
-		0,
-		"maximum memory allocated by LoadSim in MiB",
+		"",
+		"maximum memory allocated by LoadSim in MiB, or auto",
 	)
 	flags.IntVar(
 		&options.memoryMaxGiB,
@@ -107,6 +109,12 @@ func newFillCommand(options *fillOptions) *cobra.Command {
 		"cpu-nice",
 		"19",
 		"nice value for the explicit normal scheduler, 0 to 19 or inherit",
+	)
+	flags.StringVar(
+		&options.yieldPolicy,
+		"yield-policy",
+		"gradual",
+		"resource withdrawal above HIGH: gradual or zero",
 	)
 	flags.IntVar(
 		&options.memoryControlMS,
@@ -169,6 +177,153 @@ func init() {
 	rootCmd.AddCommand(fillCmd)
 }
 
+// fillRunSummary aggregates status samples so a normal run can end with one
+// human-readable summary line describing how well the band targets were met.
+type fillRunSummary struct {
+	lock sync.Mutex
+
+	cpuSamples   int
+	cpuInBand    int
+	cpuHasBand   bool
+	cpuBandLow   float64
+	cpuBandHigh  float64
+	cpuHasSample bool
+	cpuMin       float64
+	cpuMax       float64
+	cpuSum       float64
+
+	memorySamples   int
+	memoryInBand    int
+	memoryHasBand   bool
+	memoryBandLow   float64
+	memoryBandHigh  float64
+	memoryHasSample bool
+	memoryMin       float64
+	memoryMax       float64
+	memorySum       float64
+
+	rssMaxMB      uint64
+	availableMin  uint64
+	availableSeen bool
+}
+
+func (s *fillRunSummary) observeCPU(status stress.CPUStatus) {
+	if !status.HasScopeSample {
+		return
+	}
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if !s.cpuHasBand {
+		s.cpuBandLow = status.RequestedBandLowPercent
+		s.cpuBandHigh = status.RequestedBandHighPercent
+		s.cpuHasBand = true
+	}
+	if !s.cpuHasSample {
+		s.cpuMin = status.LastScopePercent
+		s.cpuHasSample = true
+	}
+	if status.LastScopePercent < s.cpuMin {
+		s.cpuMin = status.LastScopePercent
+	}
+	if status.LastScopePercent > s.cpuMax {
+		s.cpuMax = status.LastScopePercent
+	}
+	s.cpuSum += status.LastScopePercent
+	s.cpuSamples++
+	if status.LastScopePercent >= s.cpuBandLow &&
+		status.LastScopePercent <= s.cpuBandHigh {
+		s.cpuInBand++
+	}
+}
+
+func (s *fillRunSummary) observeMemory(status stress.RAMStatus, adaptive adaptiveMemoryStatus) {
+	// 释放阶段（requested=0）的观测值不代表填充状态，不计入达标统计。
+	if !adaptive.hasSample || status.RequestedMB <= 0 {
+		return
+	}
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if !s.memoryHasBand {
+		s.memoryBandLow = adaptive.lowPercent
+		s.memoryBandHigh = adaptive.highPercent
+		s.memoryHasBand = true
+	}
+	if !s.memoryHasSample {
+		s.memoryMin = adaptive.observed
+		s.memoryHasSample = true
+	}
+	if adaptive.observed < s.memoryMin {
+		s.memoryMin = adaptive.observed
+	}
+	if adaptive.observed > s.memoryMax {
+		s.memoryMax = adaptive.observed
+	}
+	s.memorySum += adaptive.observed
+	s.memorySamples++
+	if adaptive.observed >= s.memoryBandLow &&
+		adaptive.observed <= s.memoryBandHigh {
+		s.memoryInBand++
+	}
+}
+
+func (s *fillRunSummary) observeRSS(rssMB uint64) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if rssMB > s.rssMaxMB {
+		s.rssMaxMB = rssMB
+	}
+}
+
+func (s *fillRunSummary) observeAvailable(availableMB uint64) {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	if !s.availableSeen || availableMB < s.availableMin {
+		s.availableMin = availableMB
+		s.availableSeen = true
+	}
+}
+
+func (s *fillRunSummary) String() string {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	fields := []string{fmt.Sprintf("samples=%d", maxInt(s.cpuSamples, s.memorySamples))}
+	if s.cpuHasBand {
+		fields = append(
+			fields,
+			fmt.Sprintf("cpu_band=%.1f:%.1f%%", s.cpuBandLow, s.cpuBandHigh),
+			fmt.Sprintf("cpu_in_band=%d/%d", s.cpuInBand, s.cpuSamples),
+			fmt.Sprintf("cpu_observed_min=%.1f%%", s.cpuMin),
+			fmt.Sprintf("cpu_observed_avg=%.1f%%", s.cpuSum/float64(s.cpuSamples)),
+			fmt.Sprintf("cpu_observed_max=%.1f%%", s.cpuMax),
+		)
+	}
+	if s.memoryHasBand {
+		fields = append(
+			fields,
+			fmt.Sprintf("memory_band=%.1f:%.1f%%", s.memoryBandLow, s.memoryBandHigh),
+			fmt.Sprintf("memory_in_band=%d/%d", s.memoryInBand, s.memorySamples),
+			fmt.Sprintf("memory_observed_min=%.1f%%", s.memoryMin),
+			fmt.Sprintf("memory_observed_avg=%.1f%%", s.memorySum/float64(s.memorySamples)),
+			fmt.Sprintf("memory_observed_max=%.1f%%", s.memoryMax),
+		)
+	}
+	if s.rssMaxMB > 0 {
+		fields = append(fields, fmt.Sprintf("process_rss_max=%dMiB", s.rssMaxMB))
+	}
+	if s.availableSeen {
+		fields = append(fields, fmt.Sprintf("memory_available_min=%dMiB", s.availableMin))
+	}
+	return "summary: " + strings.Join(fields, " ")
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
+}
+
 func runFill(command *cobra.Command, options fillOptions) error {
 	hasCPU := strings.TrimSpace(options.cpuBand) != ""
 	hasMemory := strings.TrimSpace(options.memoryBand) != ""
@@ -210,6 +365,11 @@ func runFill(command *cobra.Command, options fillOptions) error {
 		"status interval",
 		false,
 	)
+	if err != nil {
+		return err
+	}
+
+	yieldPolicy, err := parseYieldPolicy(options.yieldPolicy)
 	if err != nil {
 		return err
 	}
@@ -265,6 +425,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 			Mode:            stress.ModeFixed,
 			Scope:           stress.ScopeSystem,
 			IdleMode:        stress.IdleModePark,
+			YieldPolicy:     yieldPolicy,
 			Percent:         (cpuBand.low + cpuBand.high) / 2,
 			Cores:           options.cpuCores,
 			ControlInterval: controlInterval,
@@ -294,7 +455,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 		if err != nil {
 			return err
 		}
-		maxMemoryMiB, err := selectMemoryMaximum(
+		maxMemoryMiB, automaticMaximum, err := parseMemoryMaximum(
 			options.memoryMaxMiB,
 			options.memoryMaxGiB,
 		)
@@ -323,6 +484,21 @@ func runFill(command *cobra.Command, options fillOptions) error {
 		if err := validateOOMScoreAdj(options.oomScoreAdj); err != nil {
 			return err
 		}
+		if automaticMaximum {
+			capacities, err := systemMemoryCapacities()
+			if err != nil {
+				return fmt.Errorf("probe automatic RAM maximum: %w", err)
+			}
+			maxMemoryMiB, err = automaticMemoryMaximum(
+				capacities,
+				memoryBand,
+				options.memoryBlockMiB,
+				uint64(options.memoryMinAvailableMiB),
+			)
+			if err != nil {
+				return err
+			}
+		}
 
 		ramStressor, err = stress.NewRAMStressor(stress.RAMConfig{
 			Mode:                     stress.ModeFixed,
@@ -347,6 +523,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 				interval:                 controllerInterval,
 				blockMB:                  options.memoryBlockMiB,
 				configuredMinAvailableMB: uint64(options.memoryMinAvailableMiB),
+				yieldPolicy:              yieldPolicy,
 			},
 			ramStressor,
 			emergencyStop,
@@ -428,6 +605,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 		)
 	}
 	firstStatus := true
+	summary := &fillRunSummary{}
 	printStatus := func() {
 		var diagnosticFields []string
 		if firstStatus {
@@ -441,6 +619,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 			memoryController,
 			options.oomScoreAdj,
 			diagnosticFields,
+			summary,
 		)
 	}
 	reason, runErr := watchLoop(
@@ -478,6 +657,7 @@ func runFill(command *cobra.Command, options fillOptions) error {
 					memoryController,
 					options.oomScoreAdj,
 					nil,
+					summary,
 				)
 			},
 			ramStressorErrors(ramStressor),
@@ -506,6 +686,9 @@ func runFill(command *cobra.Command, options fillOptions) error {
 		return err
 	}
 
+	if line := summary.String(); line != "summary: samples=0" {
+		fmt.Println(line)
+	}
 	fmt.Printf("stopped: %s\n", reason)
 	return nil
 }
@@ -538,10 +721,14 @@ func printFillStatus(
 	controller *adaptiveMemoryController,
 	oomScoreAdj int,
 	diagnosticFields []string,
+	summary *fillRunSummary,
 ) {
 	fields := []string{"mode=fill"}
 	if cpuStressor != nil {
 		status := cpuStressor.Status()
+		if summary != nil {
+			summary.observeCPU(status)
+		}
 		fields = append(
 			fields,
 			fmt.Sprintf(
@@ -551,6 +738,7 @@ func printFillStatus(
 			),
 			"cpu_scope="+string(status.Scope),
 			"cpu_scheduler="+string(status.WorkerScheduler),
+			"cpu_yield_policy="+string(status.YieldPolicy),
 		)
 		if status.WorkerScheduler == stress.WorkerSchedulerNormal {
 			fields = append(
@@ -584,6 +772,9 @@ func printFillStatus(
 
 	if ramStressor != nil && controller != nil {
 		ramStatus, adaptiveStatus := controller.Snapshot()
+		if summary != nil {
+			summary.observeMemory(ramStatus, adaptiveStatus)
+		}
 		fields = append(
 			fields,
 			fmt.Sprintf(
@@ -591,6 +782,7 @@ func printFillStatus(
 				adaptiveStatus.lowPercent,
 				adaptiveStatus.highPercent,
 			),
+			"memory_yield_policy="+string(controller.config.yieldPolicy),
 			"memory_action="+string(adaptiveStatus.action),
 			"memory_observed_scope="+adaptiveStatus.scope,
 			fmt.Sprintf(
@@ -614,6 +806,9 @@ func printFillStatus(
 	}
 
 	if stats, err := system.Snapshot(); err == nil {
+		if summary != nil {
+			summary.observeRSS(stats.ProcessRSSMB)
+		}
 		fields = append(
 			fields,
 			"memory_scope="+stats.MemoryScope,
@@ -623,6 +818,9 @@ func printFillStatus(
 	}
 	if guard != nil {
 		if snapshot, err := guard.safetySnapshot(); err == nil {
+			if summary != nil {
+				summary.observeAvailable(snapshot.availableMB)
+			}
 			fields = append(
 				fields,
 				"memory_guard_scope="+snapshot.source,

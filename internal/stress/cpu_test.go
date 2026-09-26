@@ -493,6 +493,73 @@ func TestCPUStressorSystemScopeControlsVisibleUtilization(t *testing.T) {
 	}
 }
 
+func TestCPUStressorSystemScopeZeroYieldClearsAndRestoresDrive(t *testing.T) {
+	capacity := cpuCapacity{
+		hostCPUs:    8,
+		processCPUs: 2,
+		maxWorkers:  2,
+	}
+	observed := []float64{70, 20}
+	stressor, err := newCPUStressorWithSystemAccounting(
+		CPUConfig{
+			Mode:            ModeFixed,
+			Scope:           ScopeSystem,
+			IdleMode:        IdleModePark,
+			Percent:         50,
+			Cores:           2,
+			DeadbandPercent: 5,
+			MaxStepPercent:  5,
+			YieldPolicy:     YieldPolicyZero,
+		},
+		fixedCPUCapacity(capacity),
+		nil,
+		func() (VisibleSystemCPUInfo, error) {
+			return VisibleSystemCPUInfo{
+				Source:       testVisibleSystemSource,
+				BoundaryID:   testVisibleSystemID,
+				BoundaryKind: VisibleSystemCPUBoundaryNamespaceRoot,
+				CPUs:         2,
+			}, nil
+		},
+		func(context.Context, time.Duration) (VisibleSystemCPUSample, error) {
+			percent := observed[0]
+			observed = observed[1:]
+			return VisibleSystemCPUSample{
+				Source:       testVisibleSystemSource,
+				BoundaryID:   testVisibleSystemID,
+				BoundaryKind: VisibleSystemCPUBoundaryNamespaceRoot,
+				CPUs:         2,
+				Percent:      percent,
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("new system stressor: %v", err)
+	}
+	defer stressor.Stop()
+	stressor.sampleProcessCPU = nil
+	stressor.setupWorkerNice = func(int) error { return nil }
+
+	stressor.lock.Lock()
+	stressor.lifecycle = cpuLifecycleRunning
+	stressor.startedAt = time.Now()
+	stressor.appliedPercent = 50
+	stressor.lock.Unlock()
+
+	if !stressor.controlTick() {
+		t.Fatal("hard-yield control tick failed")
+	}
+	if got := stressor.Status().AppliedPercent; got != 0 {
+		t.Fatalf("drive after hard yield = %.1f want 0", got)
+	}
+	if !stressor.controlTick() {
+		t.Fatal("recovery control tick failed")
+	}
+	if got := stressor.Status().AppliedPercent; got != 5 {
+		t.Fatalf("drive after recovery = %.1f want 5", got)
+	}
+}
+
 func TestCPUStressorSystemScopeAcceptsRawCapacityBurstAndBacksOff(t *testing.T) {
 	stressor, err := newCPUStressorWithSystemAccounting(
 		CPUConfig{

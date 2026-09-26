@@ -26,6 +26,7 @@ type adaptiveMemoryConfig struct {
 	interval                 time.Duration
 	blockMB                  int
 	configuredMinAvailableMB uint64
+	yieldPolicy              stress.YieldPolicy
 }
 
 type adaptiveMemoryAction string
@@ -82,6 +83,13 @@ func newAdaptiveMemoryController(
 	stressor *stress.RAMStressor,
 	emergencyStop func() error,
 ) (*adaptiveMemoryController, error) {
+	if config.yieldPolicy == "" {
+		config.yieldPolicy = stress.YieldPolicyGradual
+	}
+	if config.yieldPolicy != stress.YieldPolicyGradual &&
+		config.yieldPolicy != stress.YieldPolicyZero {
+		return nil, fmt.Errorf("adaptive RAM yield policy must be gradual or zero")
+	}
 	if err := validateAdaptiveMemoryConfig(config); err != nil {
 		return nil, err
 	}
@@ -141,8 +149,8 @@ func validateAdaptiveMemoryConfig(config adaptiveMemoryConfig) error {
 			minimumAdaptiveMemoryBandWidth,
 		)
 	}
-	if config.maxLoadMB <= 0 {
-		return fmt.Errorf("adaptive RAM maximum allocation must be greater than zero")
+	if config.maxLoadMB < 0 {
+		return fmt.Errorf("adaptive RAM maximum allocation must not be negative")
 	}
 	if config.interval < minimumAdaptiveMemoryInterval {
 		return fmt.Errorf(
@@ -157,6 +165,43 @@ func validateAdaptiveMemoryConfig(config adaptiveMemoryConfig) error {
 		)
 	}
 	return nil
+}
+
+func automaticMemoryMaximum(
+	capacities []memoryCapacity,
+	band percentBand,
+	blockMB int,
+	configuredMinAvailableMB uint64,
+) (int, error) {
+	if len(capacities) == 0 {
+		return 0, fmt.Errorf("automatic RAM probe returned no constraints")
+	}
+
+	midpointPercent := (band.low + band.high) / 2
+	maximum := math.MaxInt
+	for _, capacity := range capacities {
+		candidate, err := adaptiveTargetForCapacity(
+			0,
+			capacity,
+			midpointPercent,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if candidate < maximum {
+			maximum = candidate
+		}
+	}
+	if err := validateRAMCapacitySnapshots(
+		capacities,
+		maximum,
+		blockMB,
+		configuredMinAvailableMB,
+		false,
+	); err != nil {
+		return 0, fmt.Errorf("automatic RAM maximum is unsafe: %w", err)
+	}
+	return maximum, nil
 }
 
 // Preflight starts adaptive mode from zero, verifies the worst permitted
@@ -348,7 +393,13 @@ func (c *adaptiveMemoryController) adjust() error {
 			return fmt.Errorf("adaptive RAM growth is unsafe: %w", err)
 		}
 	}
-	if decision.targetMB != ramStatus.RequestedMB {
+	if decision.action == adaptiveMemoryShrink &&
+		c.config.yieldPolicy == stress.YieldPolicyZero &&
+		decision.targetMB == 0 {
+		if err := c.stressor.ReleaseImmediately(); err != nil {
+			return fmt.Errorf("release adaptive RAM immediately: %w", err)
+		}
+	} else if decision.targetMB != ramStatus.RequestedMB {
 		if err := c.stressor.UpdateTargetMB(decision.targetMB); err != nil {
 			return fmt.Errorf("update adaptive RAM target: %w", err)
 		}
@@ -419,6 +470,12 @@ func nextAdaptiveMemoryTarget(
 
 	midpoint := (config.lowPercent + config.highPercent) / 2
 	if len(aboveHigh) > 0 {
+		if config.yieldPolicy == stress.YieldPolicyZero {
+			decision.targetMB = 0
+			decision.action = adaptiveMemoryShrink
+			decision.lowSamples = 0
+			return decision, nil
+		}
 		targetMB := decision.targetMB
 		for _, capacity := range aboveHigh {
 			candidate, err := adaptiveTargetForCapacity(

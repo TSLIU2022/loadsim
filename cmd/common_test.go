@@ -550,70 +550,6 @@ func TestMemoryGuardRejectsOverlyAggressiveCheckInterval(t *testing.T) {
 	}
 }
 
-func TestStopRAMBeforeCPUReleasesMemoryFirst(t *testing.T) {
-	ramReleased := false
-	var order []string
-
-	ramErr, cpuErr := stopRAMBeforeCPU(
-		func() error {
-			order = append(order, "ram")
-			ramReleased = true
-			return errors.New("RAM stop failed")
-		},
-		func() error {
-			if !ramReleased {
-				t.Fatal("CPU stop began before RAM was released")
-			}
-			order = append(order, "cpu")
-			return errors.New("CPU stop failed")
-		},
-	)
-	if strings.Join(order, ",") != "ram,cpu" {
-		t.Fatalf("stop order=%v want [ram cpu]", order)
-	}
-	if ramErr == nil || cpuErr == nil {
-		t.Fatalf("stop errors=%v/%v want both preserved", ramErr, cpuErr)
-	}
-}
-
-func TestStopRAMBeforeCPUDoesNotDelayRAMForSlowCPUStop(t *testing.T) {
-	ramStopped := make(chan struct{})
-	allowCPUStop := make(chan struct{})
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		_, _ = stopRAMBeforeCPU(
-			func() error {
-				close(ramStopped)
-				return nil
-			},
-			func() error {
-				<-allowCPUStop
-				return nil
-			},
-		)
-	}()
-
-	select {
-	case <-ramStopped:
-	case <-time.After(time.Second):
-		t.Fatal("RAM stop was delayed by CPU stop")
-	}
-	select {
-	case <-done:
-		t.Fatal("cleanup completed before the simulated CPU stop was released")
-	default:
-	}
-
-	close(allowCPUStop)
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("cleanup did not finish after CPU stop was released")
-	}
-}
-
 func TestValidateOOMScoreAdj(t *testing.T) {
 	for _, value := range []int{-1, 0, 500, 1000} {
 		if err := validateOOMScoreAdj(value); err != nil {
@@ -683,9 +619,9 @@ func TestSafeDefaultsAreBounded(t *testing.T) {
 			stressConfig.durationSec,
 		)
 	}
-	if fillConfig.memoryMaxMiB != 0 || fillConfig.memoryMaxGiB != 0 {
+	if fillConfig.memoryMaxMiB != "" || fillConfig.memoryMaxGiB != 0 {
 		t.Fatalf(
-			"fill memory maximum must be explicit: mib=%d gib=%d",
+			"fill memory maximum must be explicit: mib=%q gib=%d",
 			fillConfig.memoryMaxMiB,
 			fillConfig.memoryMaxGiB,
 		)
@@ -721,6 +657,9 @@ func TestSafeDefaultsAreBounded(t *testing.T) {
 			fillConfig.cpuScheduler,
 			stressConfig.cpuScheduler,
 		)
+	}
+	if fillConfig.yieldPolicy != "gradual" {
+		t.Fatalf("unexpected fill yield policy default: %q", fillConfig.yieldPolicy)
 	}
 	if fillConfig.memoryGrowMiBPerSec <= 0 ||
 		fillConfig.memoryReleaseMiBPerSec <= 0 {

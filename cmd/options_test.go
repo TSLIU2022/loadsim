@@ -62,6 +62,20 @@ func TestSelectMemoryMaximumSupportsMiBAndGiB(t *testing.T) {
 	}
 }
 
+func TestParseMemoryMaximumSupportsAutomaticMode(t *testing.T) {
+	maximum, automatic, err := parseMemoryMaximum(" auto ", 0)
+	if err != nil || !automatic || maximum != 0 {
+		t.Fatalf("automatic maximum=%d automatic=%t err=%v", maximum, automatic, err)
+	}
+
+	if _, _, err := parseMemoryMaximum("auto", 2); err == nil {
+		t.Fatal("automatic maximum accepted with a GiB maximum")
+	}
+	if _, _, err := parseMemoryMaximum("invalid", 0); err == nil {
+		t.Fatal("invalid memory maximum was accepted")
+	}
+}
+
 func TestParseWorkerScheduler(t *testing.T) {
 	for input, want := range map[string]stress.CPUWorkerScheduler{
 		"idle":     stress.WorkerSchedulerIdle,
@@ -74,6 +88,21 @@ func TestParseWorkerScheduler(t *testing.T) {
 	}
 	if _, err := parseWorkerScheduler("realtime"); err == nil {
 		t.Fatal("unsupported scheduler was accepted")
+	}
+}
+
+func TestParseYieldPolicy(t *testing.T) {
+	for input, want := range map[string]stress.YieldPolicy{
+		"gradual": stress.YieldPolicyGradual,
+		" ZERO ":  stress.YieldPolicyZero,
+	} {
+		got, err := parseYieldPolicy(input)
+		if err != nil || got != want {
+			t.Fatalf("parse %q=%q err=%v want=%q", input, got, err, want)
+		}
+	}
+	if _, err := parseYieldPolicy("pause"); err == nil {
+		t.Fatal("unsupported yield policy was accepted")
 	}
 }
 

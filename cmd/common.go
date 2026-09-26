@@ -543,12 +543,6 @@ func formatOOMScoreAdj(value int) string {
 	return strconv.Itoa(value)
 }
 
-func stopRAMBeforeCPU(stopRAM, stopCPU func() error) (error, error) {
-	ramErr := stopRAM()
-	cpuErr := stopCPU()
-	return ramErr, cpuErr
-}
-
 // drainClosedErrors must only be called after the channel owners have stopped
 // and closed their error channels.
 func drainClosedErrors(channels ...<-chan error) error {

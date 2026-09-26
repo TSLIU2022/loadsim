@@ -215,6 +215,33 @@ func (s *RAMStressor) Errors() <-chan error {
 	return s.errorsCh
 }
 
+// ReleaseImmediately removes all simulated RAM without applying the normal
+// release-rate limit. The stressor remains running and can accept a later
+// target update.
+func (s *RAMStressor) ReleaseImmediately() error {
+	s.lock.Lock()
+	if s.config.Mode != ModeFixed {
+		s.lock.Unlock()
+		return fmt.Errorf("immediate RAM release is supported only in fixed mode")
+	}
+	if s.stopped {
+		s.lock.Unlock()
+		return fmt.Errorf("RAM cannot be released after Stop")
+	}
+	close(s.targetCancelCh)
+	s.targetCancelCh = make(chan struct{})
+	s.config.SizeMB = 0
+	s.targetEpoch++
+	s.requestedMB = 0
+	s.targetMB = 0
+	s.rateLastAt = time.Now()
+	s.rateCreditMB = 0
+	s.rateDirection = 0
+	s.lock.Unlock()
+
+	return s.resizeToEpoch(0, 0, false)
+}
+
 // UpdateTargetMB changes the requested allocation of a fixed-mode stressor.
 // It may be used before Start to preset the initial target, or while the
 // stressor is running. The control loop applies running updates using the

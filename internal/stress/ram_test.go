@@ -503,6 +503,42 @@ func TestRAMUpdateTargetGrowsAndShrinksRunningFixedStressor(t *testing.T) {
 	}
 }
 
+func TestRAMReleaseImmediatelyBypassesReleaseRate(t *testing.T) {
+	stressor, err := NewRAMStressor(RAMConfig{
+		Mode:                     ModeFixed,
+		SizeMB:                   2,
+		BlockMB:                  1,
+		ControlInterval:          time.Hour,
+		ReleaseRateLimitMBPerSec: 1,
+	})
+	if err != nil {
+		t.Fatalf("NewRAMStressor: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stressor.Stop(); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+	})
+
+	if err := stressor.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitRAMCurrentMB(t, stressor, 2)
+
+	if err := stressor.ReleaseImmediately(); err != nil {
+		t.Fatalf("ReleaseImmediately: %v", err)
+	}
+	status := stressor.Status()
+	if status.RequestedMB != 0 || status.TargetMB != 0 || status.CurrentMB != 0 {
+		t.Fatalf(
+			"requested/target/current=%d/%d/%d want 0/0/0",
+			status.RequestedMB,
+			status.TargetMB,
+			status.CurrentMB,
+		)
+	}
+}
+
 func TestRAMUpdateTargetPreservesRateLimit(t *testing.T) {
 	stressor, err := NewRAMStressor(RAMConfig{
 		Mode:                    ModeFixed,

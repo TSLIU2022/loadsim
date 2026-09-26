@@ -38,7 +38,6 @@ func TestValidateAdaptiveMemoryConfig(t *testing.T) {
 		{name: "reversed range", change: func(c *adaptiveMemoryConfig) { c.lowPercent = 50 }},
 		{name: "maximum above safety ceiling", change: func(c *adaptiveMemoryConfig) { c.highPercent = 81 }},
 		{name: "narrow range", change: func(c *adaptiveMemoryConfig) { c.highPercent = 34 }},
-		{name: "zero allocation cap", change: func(c *adaptiveMemoryConfig) { c.maxLoadMB = 0 }},
 		{name: "negative allocation cap", change: func(c *adaptiveMemoryConfig) { c.maxLoadMB = -1 }},
 		{name: "fast interval", change: func(c *adaptiveMemoryConfig) { c.interval = 100 * time.Millisecond }},
 		{name: "zero block", change: func(c *adaptiveMemoryConfig) { c.blockMB = 0 }},
@@ -53,6 +52,41 @@ func TestValidateAdaptiveMemoryConfig(t *testing.T) {
 				t.Fatal("invalid config was accepted")
 			}
 		})
+	}
+}
+
+func TestAutomaticMemoryMaximumUsesSmallestMidpointTarget(t *testing.T) {
+	maximum, err := automaticMemoryMaximum(
+		[]memoryCapacity{
+			{totalMB: 1000, usedMB: 200, availableMB: 800, source: "host"},
+			{totalMB: 800, usedMB: 100, availableMB: 700, source: "cgroup"},
+		},
+		percentBand{low: 65, high: 70},
+		16,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("select automatic maximum: %v", err)
+	}
+	if maximum != 440 {
+		t.Fatalf("automatic maximum=%d want 440", maximum)
+	}
+}
+
+func TestAutomaticMemoryMaximumRejectsUnsafeMidpointTarget(t *testing.T) {
+	_, err := automaticMemoryMaximum(
+		[]memoryCapacity{{
+			totalMB:     1000,
+			usedMB:      200,
+			availableMB: 500,
+			source:      "host",
+		}},
+		percentBand{low: 65, high: 70},
+		16,
+		0,
+	)
+	if err == nil || !strings.Contains(err.Error(), "startup budget") {
+		t.Fatalf("unsafe automatic maximum error=%v", err)
 	}
 }
 
@@ -135,6 +169,128 @@ func TestAdaptiveMemoryAboveHighShrinksToMidpointImmediately(t *testing.T) {
 		decision.targetMB != 190 ||
 		decision.lowSamples != 0 {
 		t.Fatalf("decision=%+v want immediate shrink to 190MB", decision)
+	}
+}
+
+func TestAdaptiveMemoryZeroYieldReleasesAllAboveHigh(t *testing.T) {
+	config := testAdaptiveMemoryConfig()
+	config.yieldPolicy = stress.YieldPolicyZero
+
+	decision, err := nextAdaptiveMemoryTarget(
+		config,
+		[]memoryCapacity{{
+			totalMB: 1000,
+			usedMB:  510,
+			source:  "host",
+		}},
+		300,
+		300,
+		2,
+	)
+	if err != nil {
+		t.Fatalf("decision: %v", err)
+	}
+	if decision.action != adaptiveMemoryShrink || decision.targetMB != 0 {
+		t.Fatalf("decision=%+v want zero-yield release", decision)
+	}
+}
+
+func TestAdaptiveMemoryZeroYieldRequiresTwoLowSamplesBeforeGrowth(t *testing.T) {
+	config := testAdaptiveMemoryConfig()
+	config.yieldPolicy = stress.YieldPolicyZero
+	overloaded := []memoryCapacity{{
+		totalMB: 1000,
+		usedMB:  600,
+		source:  "host",
+	}}
+	released, err := nextAdaptiveMemoryTarget(config, overloaded, 300, 300, 2)
+	if err != nil {
+		t.Fatalf("overloaded decision: %v", err)
+	}
+	if released.targetMB != 0 || released.lowSamples != 0 {
+		t.Fatalf("overloaded decision=%+v want zero release", released)
+	}
+
+	belowLow := []memoryCapacity{{
+		totalMB: 1000,
+		usedMB:  200,
+		source:  "host",
+	}}
+	confirmed, err := nextAdaptiveMemoryTarget(
+		config,
+		belowLow,
+		0,
+		0,
+		released.lowSamples,
+	)
+	if err != nil {
+		t.Fatalf("first recovery decision: %v", err)
+	}
+	if confirmed.action != adaptiveMemoryConfirm || confirmed.targetMB != 0 {
+		t.Fatalf("first recovery decision=%+v want confirmation", confirmed)
+	}
+	recovered, err := nextAdaptiveMemoryTarget(
+		config,
+		belowLow,
+		0,
+		0,
+		confirmed.lowSamples,
+	)
+	if err != nil {
+		t.Fatalf("second recovery decision: %v", err)
+	}
+	if recovered.action != adaptiveMemoryGrow || recovered.targetMB != 200 {
+		t.Fatalf("second recovery decision=%+v want 200MB growth", recovered)
+	}
+}
+
+func TestAdaptiveMemoryControllerZeroYieldReleasesImmediately(t *testing.T) {
+	stressor, err := stress.NewRAMStressor(stress.RAMConfig{
+		Mode:                     stress.ModeFixed,
+		SizeMB:                   2,
+		BlockMB:                  1,
+		ControlInterval:          time.Millisecond,
+		GrowthRateLimitMBPerSec:  100,
+		ReleaseRateLimitMBPerSec: 100,
+	})
+	if err != nil {
+		t.Fatalf("NewRAMStressor: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := stressor.Stop(); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	})
+	if err := stressor.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	waitAdaptiveRAMCurrentMB(t, stressor, 2)
+
+	config := testAdaptiveMemoryConfig()
+	config.yieldPolicy = stress.YieldPolicyZero
+	controller, err := newAdaptiveMemoryController(config, stressor, stressor.Stop)
+	if err != nil {
+		t.Fatalf("new controller: %v", err)
+	}
+	controller.probe = func() ([]memoryCapacity, error) {
+		return []memoryCapacity{{
+			totalMB: 100,
+			usedMB:  60,
+			source:  "host",
+		}}, nil
+	}
+
+	if err := controller.adjust(); err != nil {
+		t.Fatalf("adjust: %v", err)
+	}
+	status := stressor.Status()
+	if status.RequestedMB != 0 || status.TargetMB != 0 || status.CurrentMB != 0 {
+		t.Fatalf(
+			"requested/target/current=%d/%d/%d want 0/0/0",
+			status.RequestedMB,
+			status.TargetMB,
+			status.CurrentMB,
+		)
 	}
 }
 
@@ -681,4 +837,33 @@ func TestAdaptiveMemoryRuntimeProbeFailureStopsStressor(t *testing.T) {
 		!strings.Contains(err.Error(), "after Stop") {
 		t.Fatalf("stressor remained updateable after fail-closed stop: %v", err)
 	}
+}
+
+func waitAdaptiveRAMCurrentMB(t *testing.T, stressor *stress.RAMStressor, want int) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		status := stressor.Status()
+		if status.CurrentMB == want && status.TargetMB == want {
+			return
+		}
+		select {
+		case err, ok := <-stressor.Errors():
+			if ok {
+				t.Fatalf("RAM controller failed while waiting for %dMB: %v", want, err)
+			}
+			t.Fatalf("RAM controller stopped while waiting for %dMB", want)
+		default:
+		}
+		time.Sleep(time.Millisecond)
+	}
+	status := stressor.Status()
+	t.Fatalf(
+		"timed out waiting for %dMB; requested/target/current=%d/%d/%d",
+		want,
+		status.RequestedMB,
+		status.TargetMB,
+		status.CurrentMB,
+	)
 }

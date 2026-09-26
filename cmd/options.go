@@ -119,6 +119,31 @@ func selectMemoryMaximum(mib int, gib int) (int, error) {
 	return selected, nil
 }
 
+func parseMemoryMaximum(mib string, gib int) (int, bool, error) {
+	mib = strings.TrimSpace(mib)
+	if strings.EqualFold(mib, "auto") {
+		if gib != 0 {
+			return 0, false, fmt.Errorf(
+				"use exactly one of --memory-max-mib or --memory-max-gib",
+			)
+		}
+		return 0, true, nil
+	}
+	if mib == "" {
+		maximum, err := selectMemoryMaximum(0, gib)
+		return maximum, false, err
+	}
+
+	maximum, err := strconv.Atoi(mib)
+	if err != nil || maximum <= 0 {
+		return 0, false, fmt.Errorf(
+			"memory maximum MiB must be a positive integer or auto",
+		)
+	}
+	selected, err := selectMemoryMaximum(maximum, gib)
+	return selected, false, err
+}
+
 func parseWorkerScheduler(value string) (stress.CPUWorkerScheduler, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case string(stress.WorkerSchedulerIdle):
@@ -127,6 +152,17 @@ func parseWorkerScheduler(value string) (stress.CPUWorkerScheduler, error) {
 		return stress.WorkerSchedulerNormal, nil
 	default:
 		return "", fmt.Errorf("CPU worker scheduler must be idle or normal")
+	}
+}
+
+func parseYieldPolicy(value string) (stress.YieldPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(stress.YieldPolicyGradual):
+		return stress.YieldPolicyGradual, nil
+	case string(stress.YieldPolicyZero):
+		return stress.YieldPolicyZero, nil
+	default:
+		return "", fmt.Errorf("yield policy must be gradual or zero")
 	}
 }
 

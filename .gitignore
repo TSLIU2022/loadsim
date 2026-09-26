@@ -22,3 +22,6 @@ backup/
 debug_output.txt
 loadsim
 .cursor/
+
+# macOS
+.DS_Store
