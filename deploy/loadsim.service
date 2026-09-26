@@ -1,0 +1,24 @@
+[Unit]
+Description=LoadSim resource fill controller
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+EnvironmentFile=/etc/loadsim/loadsim.env
+# 由 deploy/install.sh 自动渲染安装；手动安装时把 /PATH/TO/loadsim
+# 替换为实际的二进制绝对路径即可。
+ExecStart=/PATH/TO/loadsim fill --cpu ${LOADSIM_CPU_BAND} --memory ${LOADSIM_MEMORY_BAND} --memory-max-mib ${LOADSIM_MEMORY_MAX_MIB} --yield-policy ${LOADSIM_YIELD_POLICY} --duration-sec 0 --status-interval-sec ${LOADSIM_STATUS_INTERVAL_SEC}
+Restart=always
+RestartSec=30s
+TimeoutStopSec=10min
+CPUWeight=1
+OOMScoreAdjust=1000
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

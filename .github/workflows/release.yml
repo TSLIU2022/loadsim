@@ -122,13 +122,23 @@ jobs:
 
           CGO_ENABLED=0 bash scripts/generate_third_party_licenses.sh \
             "$OUT_DIR/THIRD_PARTY_LICENSES.txt"
-          cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md "$OUT_DIR/"
+          cp LICENSE "$OUT_DIR/"
+          mkdir -p "$OUT_DIR/bin" "$OUT_DIR/config" "$OUT_DIR/run" "$OUT_DIR/log"
+          install -m 0755 "$OUT_DIR/loadsim" "$OUT_DIR/bin/loadsim"
+          rm -f "$OUT_DIR/loadsim"
+          install -m 0755 deploy/loadsim-cron.sh "$OUT_DIR/bin/loadsim-cron"
+          install -m 0755 deploy/loadsim-report.sh "$OUT_DIR/bin/loadsim-report"
+          install -m 0755 deploy/install.sh "$OUT_DIR/bin/install.sh"
+          install -m 0755 deploy/uninstall.sh "$OUT_DIR/bin/uninstall.sh"
+          install -m 0644 deploy/loadsim.env.example "$OUT_DIR/config/loadsim.env.example"
           for required in \
-            loadsim \
-            README.md \
-            CHANGELOG.md \
+            bin/loadsim \
+            bin/loadsim-cron \
+            bin/loadsim-report \
+            bin/install.sh \
+            bin/uninstall.sh \
+            config/loadsim.env.example \
             LICENSE \
-            THIRD_PARTY_NOTICES.md \
             THIRD_PARTY_LICENSES.txt; do
             test -s "$OUT_DIR/$required"
           done
@@ -168,7 +178,7 @@ jobs:
           docker run --rm \
             -v "$PWD/$EXTRACT_DIR:/opt/loadsim:ro" \
             centos:7@sha256:be65f488b7764ad3638f236b7b515b3678369a5124c47b8d32916d6487418ea4 \
-            /bin/sh -lc '/opt/loadsim/loadsim version && /opt/loadsim/loadsim fill --help >/dev/null && /opt/loadsim/loadsim stress --help >/dev/null && /opt/loadsim/loadsim check --help >/dev/null'
+            /bin/sh -lc '/opt/loadsim/bin/loadsim version && /opt/loadsim/bin/loadsim fill --help >/dev/null && /opt/loadsim/bin/loadsim stress --help >/dev/null && /opt/loadsim/bin/loadsim check --help >/dev/null'
 
   release:
     needs:
