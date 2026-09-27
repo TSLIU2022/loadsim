@@ -51,7 +51,7 @@ GOTOOLCHAIN=auto go build -o loadsim .
 
 ## 填充
 
-默认目标是整机 CPU 55%–60%、内存 65%–70%。0.7.1 的内存上限只接受正整数 MiB：
+默认目标是整机 CPU 55%–60%、内存 65%–70%。内存上限用正整数 MiB，0.7.2 起也接受 `auto`（0.7.1 的发布二进制不支持）：
 
 ```bash
 loadsim fill \
